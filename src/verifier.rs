@@ -1,4 +1,5 @@
 use crate::barq::BarqIndex;
+use crate::symbolic;
 use std::sync::Arc;
 use tokio::process::Command;
 
@@ -79,11 +80,30 @@ impl Verifier {
             1.0
         };
 
-        // Step 4: Validate unsafe
-        if !verify_no_unsafe(patched) {
-            errors.push("Unsafe block detected".to_string());
+        // Step 4: Symbolic Verifier Pipeline
+        let unsafe_diags = symbolic::unsafe_check::check_unsafe(patched);
+        if !unsafe_diags.is_empty() {
+            errors.extend(unsafe_diags);
             cargo_check_pass = false;
         }
+
+        let borrow_hints = symbolic::borrow_hint::analyze_borrows(patched);
+        warnings.extend(borrow_hints);
+        
+        let dead_code = symbolic::dead_code::detect_dead_code(_file_path, patched);
+        warnings.extend(dead_code);
+        
+        let type_errors = symbolic::type_check::verify_trait_bounds(patched);
+        errors.extend(type_errors);
+        
+        let cycle_errors = symbolic::cycle_detect::detect_cycles(_file_path);
+        errors.extend(cycle_errors);
+        
+        let security_diags = symbolic::security::scan_security_patterns(patched);
+        errors.extend(security_diags);
+        
+        let perf_diags = symbolic::perf::lint_perf(patched);
+        warnings.extend(perf_diags);
 
         VerifyResult {
             cargo_check_pass,
@@ -101,34 +121,4 @@ impl Verifier {
     }
 }
 
-pub fn verify_no_unsafe(content: &str) -> bool {
-    // Basic string check as a fallback
-    if content.contains("unsafe {") || content.contains("unsafe fn") || content.contains("unsafe trait") {
-         return false;
-    }
-    
-    // Attempt parse
-    if let Ok(file) = syn::parse_file(content) {
-        for item in file.items {
-            match item {
-                syn::Item::Fn(f) => {
-                    if f.sig.unsafety.is_some() {
-                        return false;
-                    }
-                }
-                syn::Item::Trait(t) => {
-                    if t.unsafety.is_some() {
-                        return false;
-                    }
-                }
-                syn::Item::Impl(i) => {
-                    if i.unsafety.is_some() {
-                        return false;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    true
-}
+

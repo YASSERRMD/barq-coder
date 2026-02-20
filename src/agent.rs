@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+#[derive(Clone)]
 pub struct OllamaClient {
     pub base_url: String,
     pub model: String,
