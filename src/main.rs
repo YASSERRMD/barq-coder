@@ -13,6 +13,7 @@ use std::{io, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
 mod agent;
+mod agents;
 mod barq;
 mod config;
 mod macro_goals;
