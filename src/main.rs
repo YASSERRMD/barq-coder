@@ -19,6 +19,7 @@ mod config;
 mod macro_goals;
 mod orchestrator;
 mod session;
+mod symbolic;
 mod tools;
 mod tui;
 mod verifier;
