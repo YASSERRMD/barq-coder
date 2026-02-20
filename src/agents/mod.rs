@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub mod planner;
+pub mod coder;
+pub mod tester;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentRole {
     Planner,
