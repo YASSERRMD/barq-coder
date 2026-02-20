@@ -6,6 +6,7 @@ use crate::barq::BarqIndex;
 pub mod cargo_check;
 pub mod barq_search;
 pub mod edit_file;
+pub mod shell;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -25,6 +26,8 @@ impl ToolRegistry {
             tools: vec![
                 Box::new(cargo_check::CargoCheck),
                 Box::new(edit_file::EditFile),
+                Box::new(shell::ShellExec),
+                Box::new(shell::GitTool),
             ],
         }
     }
