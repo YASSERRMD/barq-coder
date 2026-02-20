@@ -1,7 +1,11 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::Arc;
+use crate::barq::BarqIndex;
 
 pub mod cargo_check;
+pub mod barq_search;
+pub mod edit_file;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -20,8 +24,19 @@ impl ToolRegistry {
         Self {
             tools: vec![
                 Box::new(cargo_check::CargoCheck),
+                Box::new(edit_file::EditFile),
             ],
         }
+    }
+
+    pub fn with_barq(barq: Arc<BarqIndex>) -> Self {
+        let mut registry = Self::new();
+        registry.register(Box::new(barq_search::BarqSearch::new(barq)));
+        registry
+    }
+
+    pub fn register(&mut self, tool: Box<dyn Tool + Send + Sync>) {
+        self.tools.push(tool);
     }
 
     pub fn get(&self, name: &str) -> Option<&Box<dyn Tool + Send + Sync>> {
