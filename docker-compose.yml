@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  barqcoder:
+    build: .
+    volumes:
+      - .:/workspace
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    command: [ "--lsp" ]
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  ollama_data:
