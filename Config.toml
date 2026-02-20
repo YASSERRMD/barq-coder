@@ -1,0 +1,7 @@
+ollama_base_url = "http://localhost:11434"
+ollama_model = "gemini-pro-3.1"
+barqdb_url = "localhost:6333"
+barqgraph_url = "localhost:6334"
+workspace_root = "./"
+max_iterations = 5
+token_limit = 4096
