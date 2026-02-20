@@ -17,6 +17,7 @@ mod agents;
 mod barq;
 mod collab;
 mod config;
+mod lsp;
 mod macro_goals;
 mod orchestrator;
 mod session;
@@ -90,6 +91,12 @@ impl App {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--lsp") {
+        lsp::start_lsp().await;
+        return Ok(());
+    }
+
     tracing_subscriber::fmt().init();
 
     // Setup terminal
