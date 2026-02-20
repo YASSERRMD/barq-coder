@@ -16,6 +16,7 @@ mod agent;
 mod barq;
 mod config;
 mod orchestrator;
+mod session;
 mod tools;
 mod verifier;
 
