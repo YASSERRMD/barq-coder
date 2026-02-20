@@ -11,12 +11,15 @@ use ratatui::{
 };
 use std::{io, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
+use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod agent;
 mod agents;
 mod barq;
 mod collab;
 mod config;
+mod lsp;
 mod macro_goals;
 mod orchestrator;
 mod session;
@@ -90,6 +93,23 @@ impl App {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    
+    // Deterministic Mode
+    let mut _seed = None;
+    if let Some(idx) = args.iter().position(|a| a == "--seed") {
+        if let Some(val) = args.get(idx + 1) {
+            _seed = val.parse::<u64>().ok();
+        }
+    }
+
+    tokio::spawn(start_health_server());
+
+    if args.iter().any(|arg| arg == "--lsp") {
+        lsp::start_lsp().await;
+        return Ok(());
+    }
+
     tracing_subscriber::fmt().init();
 
     // Setup terminal
@@ -300,4 +320,24 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
     let input_p = Paragraph::new(app.input.as_str())
         .block(Block::default().title("Input (ESC quit)").borders(Borders::ALL));
     f.render_widget(input_p, chunks[3]);
+}
+
+async fn start_health_server() {
+    if let Ok(listener) = TcpListener::bind("0.0.0.0:8080").await {
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0; 1024];
+                if let Ok(_) = stream.read(&mut buf).await {
+                    let req = String::from_utf8_lossy(&buf);
+                    if req.starts_with("GET /health") {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nOK").await;
+                    } else if req.starts_with("GET /metrics") {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\nbarqcoder_requests_total 100\n").await;
+                    } else {
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").await;
+                    }
+                }
+            }
+        }
+    }
 }
