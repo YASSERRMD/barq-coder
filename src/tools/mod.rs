@@ -9,6 +9,7 @@ pub mod edit_file;
 pub mod shell;
 pub mod file_ops;
 pub mod workspace;
+pub mod bench;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -34,6 +35,7 @@ impl ToolRegistry {
                 Box::new(file_ops::ListFiles),
                 Box::new(file_ops::CreateFile),
                 Box::new(workspace::WorkspaceTool::new(".")),
+                Box::new(bench::CargoBench),
             ],
         }
     }
