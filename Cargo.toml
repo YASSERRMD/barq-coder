@@ -21,3 +21,4 @@ async-trait = "0.1"
 barqdb = { path = "../barq/barqdb" }
 barqgraph = { path = "../barq/barqgraph" }
 rusty_ollama = { path = "../rusty_ollama" }
+serde_yaml = "0.9.34"
