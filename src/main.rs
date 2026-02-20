@@ -18,6 +18,7 @@ mod config;
 mod orchestrator;
 mod session;
 mod tools;
+mod tui;
 mod verifier;
 
 use agent::OllamaClient;
