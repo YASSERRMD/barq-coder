@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 mod agent;
 mod agents;
 mod barq;
+mod collab;
 mod config;
 mod macro_goals;
 mod orchestrator;
@@ -23,6 +24,7 @@ mod symbolic;
 mod tools;
 mod tui;
 mod verifier;
+mod voice;
 
 use agent::OllamaClient;
 use barq::BarqIndex;
