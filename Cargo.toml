@@ -20,4 +20,4 @@ clap = { version = "4.5", features = ["derive"] }
 async-trait = "0.1"
 barqdb = { path = "../barq/barqdb" }
 barqgraph = { path = "../barq/barqgraph" }
-rusty-ollama = { git = "https://github.com/lowpolycat1/rusty_ollama" }
+rusty_ollama = { path = "../rusty_ollama" }
