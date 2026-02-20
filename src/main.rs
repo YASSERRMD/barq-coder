@@ -28,6 +28,7 @@ use barq::BarqIndex;
 use config::Config;
 use orchestrator::{Orchestrator, OrchestratorEvent};
 use tools::ToolRegistry;
+use agents::coordinator::CoordinatorAgent;
 
 struct App {
     input: String,
@@ -44,6 +45,9 @@ struct App {
     current_tool: Option<String>,
     token_count: u32,
     session_id: String,
+    
+    // Agent orchestration
+    coordinator: Arc<CoordinatorAgent>,
 
     // Channels for async operations
     event_rx: Option<mpsc::Receiver<OrchestratorEvent>>,
@@ -57,9 +61,10 @@ impl App {
         // Setup barq index
         let barq = Arc::new(BarqIndex::new(&config).expect("Failed to create BarqIndex"));
         
-        let tools = ToolRegistry::with_barq(Arc::clone(&barq));
+        let tools = Arc::new(ToolRegistry::with_barq(Arc::clone(&barq)));
         
-        let orchestrator = Orchestrator::new(agent, tools, barq, config.clone());
+        let orchestrator = Orchestrator::new(agent.clone(), Arc::clone(&tools), Arc::clone(&barq), config.clone());
+        let coordinator = Arc::new(CoordinatorAgent::new(agent, Arc::clone(&barq), tools));
 
         Self {
             input: String::new(),
@@ -74,6 +79,7 @@ impl App {
             current_tool: None,
             token_count: 0,
             session_id: format!("session_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()),
+            coordinator,
             event_rx: None,
         }
     }
@@ -209,6 +215,27 @@ fn handle_input(app: &mut App) {
         app.messages.push("Replay not implemented yet.".to_string());
     } else if input == "/help" {
         app.messages.push("Commands: /index [path], /config, /clear, /replay, /help".to_string());
+    } else if input.starts_with("/goal ") {
+        app.is_thinking = true;
+        let goal_text = input["/goal ".len()..].to_string();
+        app.messages.push(format!("Starting multi-agent goal: {}", goal_text));
+        
+        let coordinator = Arc::clone(&app.coordinator);
+        let (tx, rx) = mpsc::channel(100);
+        
+        tokio::spawn(async move {
+            let _ = tx.send(OrchestratorEvent::Token("Coordinator analyzing...".to_string())).await;
+            match coordinator.execute_goal(&goal_text).await {
+                Ok(_) => {
+                    let _ = tx.send(OrchestratorEvent::Done("Goal completed successfully.".to_string())).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(OrchestratorEvent::Error(format!("Goal failed: {}", e))).await;
+                }
+            }
+        });
+        
+        app.event_rx = Some(rx);
     } else {
         // Start orchestrator loop
         app.is_thinking = true;

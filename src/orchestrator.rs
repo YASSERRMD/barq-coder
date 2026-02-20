@@ -16,7 +16,7 @@ pub enum OrchestratorEvent {
 
 pub struct Orchestrator {
     pub agent: OllamaClient,
-    pub tools: ToolRegistry,
+    pub tools: Arc<ToolRegistry>,
     pub barq: Arc<BarqIndex>,
     pub config: Config,
     pub conversation: Vec<Message>,
@@ -25,7 +25,7 @@ pub struct Orchestrator {
 impl Orchestrator {
     pub fn new(
         agent: OllamaClient,
-        tools: ToolRegistry,
+        tools: Arc<ToolRegistry>,
         barq: Arc<BarqIndex>,
         config: Config,
     ) -> Self {
