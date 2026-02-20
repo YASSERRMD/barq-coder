@@ -7,6 +7,7 @@ pub mod cargo_check;
 pub mod barq_search;
 pub mod edit_file;
 pub mod shell;
+pub mod file_ops;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -28,6 +29,9 @@ impl ToolRegistry {
                 Box::new(edit_file::EditFile),
                 Box::new(shell::ShellExec),
                 Box::new(shell::GitTool),
+                Box::new(file_ops::ReadFile),
+                Box::new(file_ops::ListFiles),
+                Box::new(file_ops::CreateFile),
             ],
         }
     }
