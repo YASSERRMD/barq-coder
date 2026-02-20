@@ -14,6 +14,7 @@ use std::{io, time::Duration};
 mod agent;
 mod barq;
 mod config;
+mod orchestrator;
 mod tools;
 mod verifier;
 
