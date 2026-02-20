@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 mod agent;
 mod barq;
 mod config;
+mod macro_goals;
 mod orchestrator;
 mod session;
 mod tools;
