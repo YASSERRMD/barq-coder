@@ -15,6 +15,7 @@ pub mod grep;
 pub mod web_fetch;
 pub mod file_history;
 pub mod tool_search;
+pub mod delegate;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Permission result from tool-specific permission checks.

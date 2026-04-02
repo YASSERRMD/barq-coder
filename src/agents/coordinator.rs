@@ -9,37 +9,79 @@ use super::reviewer::ReviewerAgent;
 
 pub struct CoordinatorAgent {
     pub barq: Arc<BarqIndex>,
-    pub planner: PlannerAgent,
-    pub coder: CoderAgent,
-    pub tester: TesterAgent,
-    pub reviewer: ReviewerAgent,
+    pub planner: Arc<PlannerAgent>,
+    pub coder: Arc<CoderAgent>,
+    pub tester: Arc<TesterAgent>,
+    pub reviewer: Arc<ReviewerAgent>,
 }
 
 impl CoordinatorAgent {
     pub fn new(llm: OllamaClient, barq: Arc<BarqIndex>, tools: Arc<ToolRegistry>) -> Self {
         Self {
             barq: barq.clone(),
-            planner: PlannerAgent::new(llm.clone(), barq.clone()),
-            coder: CoderAgent::new(llm.clone(), barq.clone(), tools.clone()),
-            tester: TesterAgent::new(llm.clone(), barq.clone(), tools.clone()),
-            reviewer: ReviewerAgent::new(llm, barq),
+            planner: Arc::new(PlannerAgent::new(llm.clone(), barq.clone())),
+            coder: Arc::new(CoderAgent::new(llm.clone(), barq.clone(), tools.clone())),
+            tester: Arc::new(TesterAgent::new(llm.clone(), barq.clone(), tools.clone())),
+            reviewer: Arc::new(ReviewerAgent::new(llm, barq)),
         }
     }
 
     pub async fn execute_goal(&self, goal: &str) -> anyhow::Result<()> {
         let plan = self.planner.decompose(goal).await?;
         
-        for step in plan {
-            // Very simplified synchronous routing for now. 
-            // Commits 37-38 will handle parallel execution and conflicts.
-            let impl_result = self.coder.implement_step(&step.id, &step.description).await?;
-            let _test_result = self.tester.test_step(&step.id, &impl_result).await?;
-            
-            // In reality, Reviewer reviews a diff, we'll mock it passing for now.
-            let is_approved = self.reviewer.review_diff(&step.id, &impl_result).await?;
-            
-            if !is_approved {
-                eprintln!("Step {} was rejected by reviewer.", step.id);
+        let mut completed = std::collections::HashSet::new();
+        let mut in_progress = std::collections::HashSet::new();
+        use futures::StreamExt;
+        let mut tasks = futures::stream::FuturesUnordered::new();
+
+        loop {
+            // Spawn any steps that have all dependencies met
+            for step in &plan {
+                if !completed.contains(&step.id) && !in_progress.contains(&step.id) {
+                    let can_start = step.dependencies.iter().all(|d| completed.contains(d));
+                    
+                    if can_start {
+                        in_progress.insert(step.id.clone());
+                        let coder = Arc::clone(&self.coder);
+                        let tester = Arc::clone(&self.tester);
+                        let reviewer = Arc::clone(&self.reviewer);
+                        let step_id = step.id.clone();
+                        let desc = step.description.clone();
+
+                        tasks.push(tokio::spawn(async move {
+                            let impl_result = coder.implement_step(&step_id, &desc).await?;
+                            let _test_result = tester.test_step(&step_id, &impl_result).await?;
+                            let is_approved = reviewer.review_diff(&step_id, &impl_result).await?;
+                            Ok::<_, anyhow::Error>((step_id, is_approved))
+                        }));
+                    }
+                }
+            }
+
+            if tasks.is_empty() {
+                break;
+            }
+
+            if let Some(res) = tasks.next().await {
+                match res {
+                    Ok(Ok((step_id, approved))) => {
+                        in_progress.remove(&step_id);
+                        completed.insert(step_id.clone());
+                        if !approved {
+                            // In real system, re-delegate to coder or mark failed
+                        }
+                    }
+                    Err(join_err) => {
+                        return Err(anyhow::anyhow!("Task join failed: {:?}", join_err));
+                    }
+                    Ok(Err(e)) => {
+                        return Err(anyhow::anyhow!("Task failed: {:?}", e));
+                    }
+                }
+            }
+
+            if completed.len() == plan.len() {
+                break;
             }
         }
 

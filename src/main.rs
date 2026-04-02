@@ -59,7 +59,12 @@ impl App {
         let config = Config::load();
         let agent = OllamaClient::new(&config.ollama_base_url, &config.ollama_model);
         let barq = Arc::new(BarqIndex::new(&config).expect("Failed to create BarqIndex"));
-        let tools = Arc::new(ToolRegistry::with_barq(Arc::clone(&barq)));
+        let mut tools_mut = ToolRegistry::with_barq(Arc::clone(&barq));
+        tools_mut.register(Box::new(crate::tools::delegate::DelegateTask::new(
+            agent.clone(),
+            Arc::clone(&barq),
+        )));
+        let tools = Arc::new(tools_mut);
         let orchestrator = Orchestrator::new(
             agent.clone(),
             Arc::clone(&tools),
