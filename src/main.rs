@@ -23,6 +23,7 @@ mod context;
 mod lsp;
 mod macro_goals;
 mod orchestrator;
+mod permissions;
 mod session;
 mod symbolic;
 mod tools;
@@ -50,6 +51,7 @@ struct App {
     event_rx: Option<mpsc::Receiver<OrchestratorEvent>>,
     session_store: SessionStore,
     session_id: String,
+    pending_permission_request: Option<tokio::sync::oneshot::Sender<bool>>,
 }
 
 impl App {
@@ -141,6 +143,7 @@ impl App {
             event_rx: None,
             session_store,
             session_id,
+            pending_permission_request: None,
         }
     }
 
@@ -268,6 +271,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.tui.tool_log.push(entry.clone());
                         app.tui.add_message(ChatMessage::tool_result(&entry));
                     }
+                    OrchestratorEvent::PermissionRequested { name, args, reason, tx } => {
+                        app.tui.current_tool = None;
+                        app.tui.add_message(ChatMessage::system(format!(
+                            "Permission requested for tool '{}': {}\nPress [Y] to allow or [N] to deny.",
+                            name, reason
+                        )));
+                        app.pending_permission_request = Some(tx);
+                    }
                     OrchestratorEvent::Done(answer) => {
                         app.tui.is_thinking = false;
                         app.tui.current_tool = None;
@@ -322,6 +333,24 @@ async fn run_app<B: ratatui::backend::Backend>(
 // Key handling
 // ─────────────────────────────────────────────────────────────────────────────
 fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
+    // Intercept Y/N if waiting for permission
+    if app.pending_permission_request.is_some() {
+        if let KeyCode::Char('y') | KeyCode::Char('Y') = key {
+            if let Some(tx) = app.pending_permission_request.take() {
+                let _ = tx.send(true);
+                app.tui.add_message(ChatMessage::system("Permission granted."));
+            }
+            return;
+        }
+        if let KeyCode::Char('n') | KeyCode::Char('N') = key {
+            if let Some(tx) = app.pending_permission_request.take() {
+                let _ = tx.send(false);
+                app.tui.add_message(ChatMessage::system("Permission denied."));
+            }
+            return;
+        }
+    }
+
     // Global: Esc → quit
     if key == KeyCode::Esc {
         app.tui.mark_quit();

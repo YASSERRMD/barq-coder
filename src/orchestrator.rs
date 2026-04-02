@@ -7,10 +7,19 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::permissions::PermissionManager;
+use tokio::sync::oneshot;
+
 pub enum OrchestratorEvent {
     Token(String),
     ToolCall { name: String, args: Value },
     ToolResult { name: String, result: Value },
+    PermissionRequested {
+        name: String,
+        args: Value,
+        reason: String,
+        tx: oneshot::Sender<bool>,
+    },
     Done(String),
     Error(String),
 }
@@ -23,6 +32,7 @@ pub struct Orchestrator {
     pub conversation: Vec<Message>,
     pub total_tokens: usize,
     pub budget: ContextBudget,
+    pub permissions: Arc<PermissionManager>,
 }
 
 impl Orchestrator {
@@ -33,6 +43,7 @@ impl Orchestrator {
         config: Config,
     ) -> Self {
         let token_limit = config.token_limit;
+        let workspace_root = config.workspace_root.clone();
         Self {
             agent,
             tools,
@@ -41,6 +52,7 @@ impl Orchestrator {
             conversation: Vec::new(),
             total_tokens: 0,
             budget: ContextBudget::new(token_limit as usize),
+            permissions: Arc::new(PermissionManager::new(&workspace_root)),
         }
     }
 
@@ -152,6 +164,7 @@ impl Orchestrator {
 
         let tool_schemas = self.build_tool_schemas();
         let tools = Arc::clone(&self.tools);
+        let permissions = Arc::clone(&self.permissions);
         let max_iterations = self.config.max_iterations;
         let agent = self.agent.clone();
 
@@ -227,25 +240,57 @@ impl Orchestrator {
                     let tool_args = &tc.function.arguments;
 
                     let result = if let Some(tool) = tools.get(tool_name) {
-                        match tool.call(tool_args.clone()).await {
-                            Ok(result) => {
-                                let _ = tx
-                                    .send(OrchestratorEvent::ToolResult {
-                                        name: tool_name.clone(),
-                                        result: result.clone(),
-                                    })
-                                    .await;
-                                result
+                        let path = tool.get_path(tool_args);
+                        let mut perm_res = if let Some(p) = path {
+                            permissions.check_path(&p)
+                        } else {
+                            crate::tools::PermissionResult::Allow
+                        };
+
+                        let tool_specific = tool.check_permissions(tool_args);
+                        if !matches!(perm_res, crate::tools::PermissionResult::Deny(_)) {
+                            perm_res = permissions.check_tool_call(tool_name, tool.is_destructive(), tool_specific);
+                        }
+
+                        if let crate::tools::PermissionResult::Deny(r) = perm_res {
+                            serde_json::json!({"error": format!("Permission denied: {}", r)})
+                        } else {
+                            let mut allowed = true;
+                            if let crate::tools::PermissionResult::Ask(reason) = perm_res {
+                                let (reply_tx, reply_rx) = oneshot::channel();
+                                let _ = tx.send(OrchestratorEvent::PermissionRequested {
+                                    name: tool_name.clone(),
+                                    args: tool_args.clone(),
+                                    reason,
+                                    tx: reply_tx,
+                                }).await;
+                                allowed = reply_rx.await.unwrap_or(false);
                             }
-                            Err(e) => {
-                                let err_val = serde_json::json!({"error": e.to_string()});
-                                let _ = tx
-                                    .send(OrchestratorEvent::ToolResult {
-                                        name: tool_name.clone(),
-                                        result: err_val.clone(),
-                                    })
-                                    .await;
-                                err_val
+
+                            if allowed {
+                                match tool.call(tool_args.clone()).await {
+                                    Ok(result) => {
+                                        let _ = tx
+                                            .send(OrchestratorEvent::ToolResult {
+                                                name: tool_name.clone(),
+                                                result: result.clone(),
+                                            })
+                                            .await;
+                                        result
+                                    }
+                                    Err(e) => {
+                                        let err_val = serde_json::json!({"error": e.to_string()});
+                                        let _ = tx
+                                            .send(OrchestratorEvent::ToolResult {
+                                                name: tool_name.clone(),
+                                                result: err_val.clone(),
+                                            })
+                                            .await;
+                                        err_val
+                                    }
+                                }
+                            } else {
+                                serde_json::json!({"error": "User denied permission."})
                             }
                         }
                     } else {
