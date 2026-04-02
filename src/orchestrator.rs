@@ -2,6 +2,7 @@ use crate::agent::{Message, OllamaClient, StreamEvent};
 use crate::barq::BarqIndex;
 use crate::config::Config;
 use crate::tools::ToolRegistry;
+use crate::context::{auto_compact, ContextBudget};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -21,6 +22,7 @@ pub struct Orchestrator {
     pub config: Config,
     pub conversation: Vec<Message>,
     pub total_tokens: usize,
+    pub budget: ContextBudget,
 }
 
 impl Orchestrator {
@@ -30,6 +32,7 @@ impl Orchestrator {
         barq: Arc<BarqIndex>,
         config: Config,
     ) -> Self {
+        let token_limit = config.token_limit;
         Self {
             agent,
             tools,
@@ -37,6 +40,7 @@ impl Orchestrator {
             config,
             conversation: Vec::new(),
             total_tokens: 0,
+            budget: ContextBudget::new(token_limit as usize),
         }
     }
 
@@ -131,11 +135,13 @@ impl Orchestrator {
         });
 
         // Update token estimate
-        self.total_tokens = self
-            .conversation
-            .iter()
-            .map(|m| Self::estimate_tokens(&m.content))
-            .sum();
+        self.total_tokens = crate::context::total_tokens(&self.conversation);
+
+        // Auto-compact if exceeding budget threshold
+        if self.budget.needs_compact(&self.conversation) {
+            auto_compact(&mut self.conversation, 10); // Keep last 10 messages
+            self.total_tokens = crate::context::total_tokens(&self.conversation);
+        }
 
         // Convert to ChatMessage format for the API
         let messages: Vec<rusty_ollama::ChatMessage> = self

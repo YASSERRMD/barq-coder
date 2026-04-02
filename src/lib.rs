@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod barq;
 pub mod config;
+pub mod context;
 pub mod collab;
 pub mod lsp;
 pub mod orchestrator;

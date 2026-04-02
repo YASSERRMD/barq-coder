@@ -19,6 +19,7 @@ mod agents;
 mod barq;
 mod collab;
 mod config;
+mod context;
 mod lsp;
 mod macro_goals;
 mod orchestrator;
@@ -33,7 +34,7 @@ use agent::OllamaClient;
 use barq::BarqIndex;
 use config::Config;
 use orchestrator::{Orchestrator, OrchestratorEvent};
-use session::{Session, SessionEvent, SessionStore};
+use session::{SessionEvent, SessionStore};
 use tools::ToolRegistry;
 use agents::coordinator::CoordinatorAgent;
 use tui::{ActiveTab, ChatMessage, Focus, SessionEntry, TuiState};
@@ -48,11 +49,11 @@ struct App {
     coordinator: Arc<CoordinatorAgent>,
     event_rx: Option<mpsc::Receiver<OrchestratorEvent>>,
     session_store: SessionStore,
-    active_session: Session,
+    session_id: String,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(resume_id: Option<String>) -> Self {
         let config = Config::load();
         let agent = OllamaClient::new(&config.ollama_base_url, &config.ollama_model);
         let barq = Arc::new(BarqIndex::new(&config).expect("Failed to create BarqIndex"));
@@ -69,25 +70,23 @@ impl App {
             tools,
         ));
 
-        let session_id = format!(
-            "session_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        );
-
         let session_store = SessionStore::new(&config.workspace_root);
+        
+        let session_id = resume_id.unwrap_or_else(|| {
+            format!(
+                "session_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            )
+        });
 
-        let active_session = Session {
-            id: session_id.clone(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            workspace: config.workspace_root.clone(),
-            events: Vec::new(),
-        };
+        // Session ID is used for JSONL transcript appending
+        let _active_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         // Load workspace files for sidebar
         let workspace_files = walkdir::WalkDir::new(&config.workspace_root)
@@ -130,7 +129,7 @@ impl App {
         let token_limit = config.token_limit;
         let model = config.ollama_model.clone();
 
-        let mut tui = TuiState::new(token_limit, model, session_id);
+        let mut tui = TuiState::new(token_limit, model, session_id.clone());
         tui.workspace_files = workspace_files;
         tui.sessions = saved_sessions;
 
@@ -141,7 +140,38 @@ impl App {
             coordinator,
             event_rx: None,
             session_store,
-            active_session,
+            session_id,
+        }
+    }
+
+    /// Load past session events into the UI
+    fn load_session(&mut self) {
+        for ev in self.session_store.replay(&self.session_id) {
+            match ev {
+                SessionEvent::UserInput { content, .. } => {
+                    self.tui.add_message(ChatMessage::user(&content));
+                }
+                SessionEvent::AssistantMessage { content, .. } => {
+                    self.tui.add_message(ChatMessage::agent(&content));
+                }
+                SessionEvent::ToolCall { name, args, .. } => {
+                    self.tui.add_message(ChatMessage::tool_call(format!(
+                        "{} ← {}",
+                        name, args
+                    )));
+                }
+                SessionEvent::EditApplied { file, patch, .. } => {
+                    // Just show as system message for historical load
+                    self.tui.add_message(ChatMessage::system(format!(
+                        "Edit applied to {}",
+                        file
+                    )));
+                }
+                SessionEvent::Error { message, .. } => {
+                    self.tui.add_message(ChatMessage::error(&message));
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -165,6 +195,15 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Check for --continue or --resume
+    let mut resume_id = None;
+    if args.iter().any(|arg| arg == "--continue") {
+        let store = SessionStore::new(".");
+        resume_id = store.last_session_id();
+    } else if let Some(idx) = args.iter().position(|a| a == "--resume") {
+        resume_id = args.get(idx + 1).cloned();
+    }
+
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -172,7 +211,11 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut app = App::new(resume_id.clone());
+    if resume_id.is_some() {
+        app.load_session();
+    }
+    
     let res = run_app(&mut terminal, &mut app).await;
 
     // Restore terminal
@@ -210,18 +253,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::Token(t) => {
                         app.tui.is_thinking = true;
                         app.tui.append_agent_token(&t);
-                        app.active_session.events.push(SessionEvent::AgentToken(t));
+                        let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&t));
                     }
                     OrchestratorEvent::ToolCall { name, args } => {
                         app.tui.current_tool = Some(name.clone());
                         let entry = format!("Calling {} with {}", name, args);
                         app.tui.tool_log.push(entry.clone());
                         app.tui.add_message(ChatMessage::tool_call(&entry));
-                        app.active_session.events.push(SessionEvent::ToolCalled {
-                            name: name.clone(),
-                            args: args.clone(),
-                            result: serde_json::Value::Null,
-                        });
+                        let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_call(&name, args.clone()));
                     }
                     OrchestratorEvent::ToolResult { name, result } => {
                         app.tui.current_tool = None;
@@ -235,8 +274,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.tui.add_message(ChatMessage::agent(&answer));
                         app.tui.set_status("Done", false);
                         app.event_rx = None;
-                        // auto-save session
-                        let _ = app.session_store.save(&app.active_session);
+                        let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&answer));
                         break;
                     }
                     OrchestratorEvent::Error(err) => {
@@ -275,7 +313,6 @@ async fn run_app<B: ratatui::backend::Backend>(
 
         // ── Quit ──────────────────────────────────────────────────────────────
         if app.tui.should_quit() {
-            let _ = app.session_store.save(&app.active_session);
             return Ok(());
         }
     }
@@ -412,28 +449,29 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                     )));
                     for ev in app.session_store.replay(&sid) {
                         match ev {
-                            SessionEvent::UserInput(u) => {
-                                app.tui.add_message(ChatMessage::user(u));
+                            SessionEvent::UserInput { content, .. } => {
+                                app.tui.add_message(ChatMessage::user(&content));
                             }
-                            SessionEvent::AgentToken(t) => {
-                                app.tui.append_agent_token(&t);
+                            SessionEvent::AssistantMessage { content, .. } => {
+                                app.tui.append_agent_token(&content);
                             }
-                            SessionEvent::ToolCalled { name, args, .. } => {
+                            SessionEvent::ToolCall { name, args, .. } => {
                                 app.tui.add_message(ChatMessage::tool_call(format!(
                                     "{} ← {}",
                                     name, args
                                 )));
                             }
-                            SessionEvent::EditApplied { file, patch } => {
+                            SessionEvent::EditApplied { file, patch, .. } => {
                                 app.tui.set_diff(&patch);
                                 app.tui.add_message(ChatMessage::system(format!(
                                     "Edit applied to {}",
                                     file
                                 )));
                             }
-                            SessionEvent::Error(e) => {
-                                app.tui.add_message(ChatMessage::error(e));
+                            SessionEvent::Error { message, .. } => {
+                                app.tui.add_message(ChatMessage::error(&message));
                             }
+                            _ => {}
                         }
                     }
                     app.tui.active_tab = ActiveTab::Chat;
@@ -469,9 +507,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
 // ─────────────────────────────────────────────────────────────────────────────
 fn submit_input(app: &mut App, input: &str) {
     app.tui.add_message(ChatMessage::user(input));
-    app.active_session
-        .events
-        .push(SessionEvent::UserInput(input.to_string()));
+    let _ = app.session_store.append(&app.session_id, &SessionEvent::user(input));
 
     if input.starts_with("/index") {
         let parts: Vec<&str> = input.split_whitespace().collect();
