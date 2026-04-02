@@ -1,6 +1,7 @@
 #![allow(unused)]
 
 pub mod agent;
+pub mod agents;
 pub mod barq;
 pub mod config;
 pub mod context;
