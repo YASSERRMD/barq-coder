@@ -3,6 +3,8 @@ use crate::barq::BarqIndex;
 use crate::tools::ToolRegistry;
 use std::sync::Arc;
 
+use crate::verifier::Verifier;
+
 pub struct TesterAgent {
     pub llm: OllamaClient,
     pub barq: Arc<BarqIndex>,
@@ -15,9 +17,19 @@ impl TesterAgent {
     }
 
     pub async fn test_step(&self, step_id: &str, impl_result: &str) -> anyhow::Result<String> {
+        // Run standard Rust verification checks first
+        let verifier = Verifier::new(self.barq.clone(), ".");
+        let res = verifier.verify_edit("", "", "").await; // Mock diff for full verification run
+        
+        let all_pass = res.cargo_check_pass && res.cargo_test_pass;
+        if all_pass {
+            return Ok(format!("Step ID: {}\nAll tests and build checks passed.", step_id));
+        }
+
+        // If it failed, let the Tester Agent think and debug the failures
         let prompt = format!(
-            "Step ID: {}\nImplementation Result: {}\n\nWrite and run Rust tests to verify this implementation. Return the test results or state what actions were taken.",
-            step_id, impl_result
+            "Step ID: {}\nImplementation Result: {}\n\nVerification failed. Use the tools to debug and fix the tests. Errors:\n{:?}",
+            step_id, impl_result, res.errors
         );
 
         let messages = vec![
