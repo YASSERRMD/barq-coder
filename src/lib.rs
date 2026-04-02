@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 pub mod agent;
 pub mod barq;
 pub mod config;

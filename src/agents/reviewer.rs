@@ -1,6 +1,5 @@
-use crate::agent::{Message, OllamaClient};
+use crate::agent::{OllamaClient, StreamEvent};
 use crate::barq::BarqIndex;
-use serde_json::Value;
 use std::sync::Arc;
 
 pub struct ReviewerAgent {
@@ -20,34 +19,36 @@ impl ReviewerAgent {
         );
 
         let messages = vec![
-            Message {
+            rusty_ollama::ChatMessage {
                 role: "system".to_string(),
                 content: crate::agents::AgentRole::Reviewer.system_prompt().to_string(),
                 tool_calls: None,
-                tool_call_id: None,
             },
-            Message {
+            rusty_ollama::ChatMessage {
                 role: "user".to_string(),
                 content: prompt,
                 tool_calls: None,
-                tool_call_id: None,
             },
         ];
 
-        let mut rx = self.llm.chat_stream(messages, vec![]);
+        let mut rx = self.llm.chat_stream(messages, None);
 
-        let mut approved = false;
-        while let Some(msg) = rx.recv().await {
-            if let Ok(val) = serde_json::from_str::<Value>(&msg) {
-                if let Some(final_msg) = val.get("final_answer").and_then(|v| v.as_str()) {
-                     if final_msg.to_lowercase().contains("\"approved\": true") || final_msg.to_lowercase().contains("approved: true") {
-                         approved = true;
-                     }
+        let mut full_response = String::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::Token(text) => {
+                    full_response.push_str(&text);
                 }
-            } else if msg.to_lowercase().contains("\"approved\": true") {
-                approved = true;
+                StreamEvent::Done => break,
+                StreamEvent::Error(e) => {
+                    return Err(anyhow::anyhow!("LLM error: {}", e));
+                }
+                _ => {}
             }
         }
+
+        let approved = full_response.to_lowercase().contains("\"approved\": true")
+            || full_response.to_lowercase().contains("\"approved\":true");
 
         Ok(approved)
     }
