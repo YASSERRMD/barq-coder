@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use crossterm::{
     event::{
         self, Event, KeyCode, KeyEventKind, KeyModifiers,
