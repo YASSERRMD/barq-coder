@@ -1,7 +1,6 @@
-use crate::agent::{Message, OllamaClient};
+use crate::agent::{OllamaClient, StreamEvent};
 use crate::barq::BarqIndex;
 use crate::tools::ToolRegistry;
-use serde_json::Value;
 use std::sync::Arc;
 
 pub struct TesterAgent {
@@ -22,31 +21,32 @@ impl TesterAgent {
         );
 
         let messages = vec![
-            Message {
+            rusty_ollama::ChatMessage {
                 role: "system".to_string(),
                 content: crate::agents::AgentRole::Tester.system_prompt().to_string(),
                 tool_calls: None,
-                tool_call_id: None,
             },
-            Message {
+            rusty_ollama::ChatMessage {
                 role: "user".to_string(),
                 content: prompt,
                 tool_calls: None,
-                tool_call_id: None,
             },
         ];
 
         let tool_schemas = self.tools.schemas();
-        let mut rx = self.llm.chat_stream(messages, tool_schemas);
+        let mut rx = self.llm.chat_stream(messages, Some(tool_schemas));
 
         let mut final_response = String::new();
-        while let Some(msg) = rx.recv().await {
-            if let Ok(val) = serde_json::from_str::<Value>(&msg) {
-                if let Some(text) = val.get("final_answer").and_then(|v| v.as_str()) {
-                    final_response.push_str(text);
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::Token(text) => {
+                    final_response.push_str(&text);
                 }
-            } else {
-                final_response.push_str(&msg);
+                StreamEvent::Done => break,
+                StreamEvent::Error(e) => {
+                    return Err(anyhow::anyhow!("LLM error: {}", e));
+                }
+                _ => {}
             }
         }
 

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+pub use rusty_ollama::{ChatMessage, StreamEvent, ToolCallFunction, ToolCallResponse};
+
 #[derive(Clone)]
 pub struct OllamaClient {
     pub base_url: String,
@@ -18,24 +20,26 @@ impl OllamaClient {
         }
     }
 
+    /// Start a streaming chat and return a channel of StreamEvents.
     pub fn chat_stream(
         &self,
-        _messages: Vec<Message>,
-        _tools: Vec<Value>,
-    ) -> mpsc::Receiver<String> {
-        let (tx, rx) = mpsc::channel(100);
-        
-        tokio::spawn(async move {
-            // Mock streaming behavior to pass cargo check
-            // In a full implementation without external crates like reqwest,
-            // we'd use tokio::net::TcpStream or rusty_ollama
-            let _ = tx.send("{\"reasoning\": \"ok\", \"final_answer\": \"done\"}".to_string()).await;
-        });
-        
-        rx
+        messages: Vec<ChatMessage>,
+        tools: Option<Vec<Value>>,
+    ) -> mpsc::Receiver<StreamEvent> {
+        self.client.chat_stream(messages, tools)
+    }
+
+    /// Non-streaming chat.
+    pub async fn chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Option<Vec<Value>>,
+    ) -> Result<ChatMessage, String> {
+        self.client.chat(messages, tools).await
     }
 }
 
+/// Conversation message used internally by the orchestrator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
@@ -44,6 +48,29 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+}
+
+impl Message {
+    /// Convert to the format expected by rusty_ollama.
+    pub fn to_chat_message(&self) -> ChatMessage {
+        let tool_calls = self.tool_calls.as_ref().map(|tcs| {
+            tcs.iter()
+                .map(|tc| ToolCallResponse {
+                    id: tc.id.clone(),
+                    function: ToolCallFunction {
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    },
+                })
+                .collect()
+        });
+
+        ChatMessage {
+            role: self.role.clone(),
+            content: self.content.clone(),
+            tool_calls,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
