@@ -23,3 +23,5 @@ barqgraph = { path = "components/barqgraph" }
 rusty_ollama = { path = "components/rusty_ollama" }
 serde_yaml = "0.9.34"
 tower-lsp = "0.20.0"
+glob = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
