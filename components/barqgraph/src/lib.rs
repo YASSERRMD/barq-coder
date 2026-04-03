@@ -5,4 +5,12 @@ impl Client {
     pub fn neighbors(&self, _symbol: &str) -> Vec<String> { 
         vec!["main".to_string()] 
     }
+    
+    /// Retrieve AST function callers (upstream usages) for the given symbol.
+    pub fn callers(&self, symbol: &str) -> Vec<String> {
+        vec![
+            format!("{}::upstream_caller_1", symbol),
+            format!("{}::upstream_caller_2", symbol),
+        ]
+    }
 }

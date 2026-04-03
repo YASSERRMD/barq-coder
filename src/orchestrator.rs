@@ -3,7 +3,7 @@ use crate::barq::BarqIndex;
 use crate::config::Config;
 use crate::cost_tracker::{BudgetStatus, CostTracker};
 use crate::tools::ToolRegistry;
-use crate::context::{auto_compact, ContextBudget};
+use crate::context::{auto_compact, ContextBudget, symbolic_injector::SymbolicInjector};
 use crate::memory::Memory;
 use serde_json::Value;
 use std::sync::Arc;
@@ -95,6 +95,10 @@ impl Orchestrator {
         let memory = Memory::load(&self.config.workspace_root);
         let memory_str = memory.to_prompt_block();
 
+        // Step 4: Symbolic context (Ast Caller Graph)
+        let injector = SymbolicInjector::new(Arc::clone(&self.barq));
+        let symbolic_ctx = injector.inject(user_input);
+
         format!(
             "You are BarqCoder, a high-performance Rust coding agent powered by BARQDB semantic search.\n\
             \n\
@@ -114,8 +118,11 @@ impl Orchestrator {
             3. NEVER apply edits without running cargo_check afterward.\n\
             4. If cargo_check fails, fix errors before giving a final answer.\n\
             5. When you need to use a tool, respond with tool_calls in the message.\n\
-            6. When the task is complete and verified, provide your final answer as plain text.",
-            memory_str, tool_desc, context_str, deps_str
+            \n\
+            {}\n\
+            \n\
+            Respond exactly with a JSON block. Use tools when needed.",
+            memory_str, tool_desc, context_str, deps_str, symbolic_ctx
         )
     }
 
