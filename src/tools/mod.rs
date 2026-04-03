@@ -17,6 +17,8 @@ pub mod file_history;
 pub mod tool_search;
 pub mod delegate;
 pub mod task_tools;
+pub mod notebook_edit;
+pub mod python_tool;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Permission result from tool-specific permission checks.
@@ -148,6 +150,8 @@ impl ToolRegistry {
                 Box::new(web_fetch::WebFetchTool),
                 Box::new(file_history::FileHistoryTool::new()),
                 Box::new(tool_search::ToolSearchTool),
+                Box::new(notebook_edit::NotebookEditTool),
+                Box::new(python_tool::PythonTool),
             ],
         }
     }
