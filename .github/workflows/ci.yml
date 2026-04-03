@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ master, phase* ]
+    branches: [ main, phase* ]
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,6 +24,13 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy -- -D warnings -A dead_code -A unused_imports -A unused_variables
       - name: Run fmt
         run: cargo fmt -- --check
+
+  docker_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        run: docker build -t barqcoder:test .

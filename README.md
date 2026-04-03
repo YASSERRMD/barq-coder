@@ -221,6 +221,39 @@ Add notes interactively: `/memory add always use snake_case for DB columns`
 
 ---
 
+## Containerization (Docker)
+
+Barq Coder provides an optimized multi-stage `Dockerfile` and builds into a tiny, non-root Debian image.
+
+```bash
+docker pull barqcoder:latest
+# or build locally:
+docker build -t barqcoder:local .
+
+# Run Barq Coder, mounting your workspace and propagating network to reach Ollama
+docker run -it --rm \
+  --network host \
+  -v $(pwd):/workspace \
+  barqcoder:local --workspace /workspace
+```
+
+---
+
+## Production & CI Deployment
+
+Barq Coder is fully configurable for CI pipelines using the `--dangerously-skip-permissions` and `--print` flags.
+
+Example GitHub Actions step using Barq Coder as an autonomous code reviewer:
+```yaml
+- name: Review Code
+  run: |
+    barqcoder print "Review the latest changes and suggest optimizations" \
+      --dangerously-skip-permissions \
+      --workspace .
+```
+
+---
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
