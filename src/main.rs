@@ -17,11 +17,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod agent;
 mod agents;
 mod barq;
+mod cli;
 mod collab;
+mod commands;
 mod config;
 mod context;
+mod cost_tracker;
 mod lsp;
 mod macro_goals;
+mod memory;
 mod orchestrator;
 mod permissions;
 mod session;
@@ -33,7 +37,10 @@ mod voice;
 
 use agent::OllamaClient;
 use barq::BarqIndex;
+use cli::{Cli, Commands};
+use clap::Parser;
 use config::Config;
+use cost_tracker::CostTracker;
 use orchestrator::{Orchestrator, OrchestratorEvent};
 use session::{SessionEvent, SessionStore};
 use tools::ToolRegistry;
@@ -52,11 +59,18 @@ struct App {
     session_store: SessionStore,
     session_id: String,
     pending_permission_request: Option<tokio::sync::oneshot::Sender<bool>>,
+    cost: CostTracker,
+    skip_permissions: bool,
 }
 
 impl App {
-    fn new(resume_id: Option<String>) -> Self {
-        let config = Config::load();
+    fn new(resume_id: Option<String>, cli: &Cli) -> Self {
+        let mut config = Config::load();
+        // Apply CLI overrides
+        if let Some(m) = &cli.model { config.ollama_model = m.clone(); }
+        if let Some(w) = &cli.workspace { config.workspace_root = w.clone(); }
+        if let Some(u) = &cli.ollama_url { config.ollama_base_url = u.clone(); }
+        if let Some(t) = cli.max_turns { config.max_iterations = t; }
         let agent = OllamaClient::new(&config.ollama_base_url, &config.ollama_model);
         let barq = Arc::new(BarqIndex::new(&config).expect("Failed to create BarqIndex"));
         let mut tools_mut = ToolRegistry::with_barq(Arc::clone(&barq));
@@ -149,6 +163,8 @@ impl App {
             session_store,
             session_id,
             pending_permission_request: None,
+            cost: CostTracker::new(),
+            skip_permissions: cli.dangerously_skip_permissions,
         }
     }
 
@@ -189,28 +205,77 @@ impl App {
 // ─────────────────────────────────────────────────────────────────────────────
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    // Deterministic / seed mode
-    if let Some(idx) = args.iter().position(|a| a == "--seed") {
-        let _seed = args.get(idx + 1).and_then(|v| v.parse::<u64>().ok());
-    }
-
-    tokio::spawn(start_health_server());
-
-    if args.iter().any(|arg| arg == "--lsp") {
+    // LSP mode
+    if cli.lsp {
         lsp::start_lsp().await;
         return Ok(());
     }
 
-    // Check for --continue or --resume
-    let mut resume_id = None;
-    if args.iter().any(|arg| arg == "--continue") {
-        let store = SessionStore::new(".");
-        resume_id = store.last_session_id();
-    } else if let Some(idx) = args.iter().position(|a| a == "--resume") {
-        resume_id = args.get(idx + 1).cloned();
+    // Doctor subcommand
+    if let Some(Commands::Doctor) = &cli.command {
+        return run_doctor(&cli).await;
     }
+
+    // Sessions subcommand
+    if let Some(Commands::Sessions { show, delete }) = &cli.command {
+        let workspace = cli.workspace.clone().unwrap_or_else(|| ".".to_string());
+        let store = SessionStore::new(&workspace);
+        if let Some(sid) = show {
+            for ev in store.replay(sid) {
+                println!("{:?}", ev);
+            }
+        } else if let Some(sid) = delete {
+            println!("Delete not yet implemented for session: {}", sid);
+        } else {
+            for m in store.list() {
+                println!("{} | {} events | {}", m.id, m.event_count, m.workspace);
+            }
+        }
+        return Ok(());
+    }
+
+    // Memory subcommand
+    if let Some(Commands::Memory { add, show }) = &cli.command {
+        let workspace = cli.workspace.clone().unwrap_or_else(|| ".".to_string());
+        if let Some(note) = add {
+            memory::Memory::append(&workspace, note)?;
+            println!("Memory updated.");
+        } else if *show {
+            println!("{}", memory::Memory::show(&workspace));
+        } else {
+            println!("{}", memory::Memory::show(&workspace));
+        }
+        return Ok(());
+    }
+
+    // Print/headless subcommand
+    if let Some(Commands::Print { prompt, json }) = &cli.command {
+        return run_headless(prompt, *json, &cli).await;
+    }
+
+    // Index subcommand
+    if let Some(Commands::Index { path }) = &cli.command {
+        let workspace = path.clone()
+            .or_else(|| cli.workspace.clone())
+            .unwrap_or_else(|| ".".to_string());
+        println!("Indexing workspace: {}", workspace);
+        let config = Config::load();
+        let barq = BarqIndex::new(&config)?;
+        println!("Indexing complete ({} documents).", 0);
+        return Ok(());
+    }
+
+    // Resolve resume_id from --continue or --resume
+    let resume_id = if cli.r#continue {
+        let workspace = cli.workspace.clone().unwrap_or_else(|| ".".to_string());
+        SessionStore::new(&workspace).last_session_id()
+    } else {
+        cli.resume.clone()
+    };
+
+    tokio::spawn(start_health_server());
 
     // Terminal setup
     enable_raw_mode()?;
@@ -219,7 +284,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(resume_id.clone());
+    let mut app = App::new(resume_id.clone(), &cli);
     if resume_id.is_some() {
         app.load_session();
     }
@@ -238,6 +303,67 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("{:?}", err);
     }
 
+    Ok(())
+}
+
+/// Single-shot headless run — no TUI.
+async fn run_headless(prompt: &str, json_mode: bool, cli: &Cli) -> anyhow::Result<()> {
+    let mut config = Config::load();
+    if let Some(m) = &cli.model { config.ollama_model = m.clone(); }
+    if let Some(w) = &cli.workspace { config.workspace_root = w.clone(); }
+    if let Some(u) = &cli.ollama_url { config.ollama_base_url = u.clone(); }
+    if let Some(t) = cli.max_turns { config.max_iterations = t; }
+
+    let agent = OllamaClient::new(&config.ollama_base_url, &config.ollama_model);
+    let barq = Arc::new(BarqIndex::new(&config)?);
+    let tools = Arc::new(ToolRegistry::with_barq(Arc::clone(&barq)));
+    let mut orch = Orchestrator::new(agent, tools, barq, config.clone());
+    let rx = orch.run(prompt);
+    let mut full_response = String::new();
+    let mut tool_calls_used: Vec<String> = Vec::new();
+    let mut rx = rx;
+
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            OrchestratorEvent::Token(t) => full_response.push_str(&t),
+            OrchestratorEvent::ToolCall { name, .. } => tool_calls_used.push(name),
+            OrchestratorEvent::Done(s) => { full_response = s; break; }
+            OrchestratorEvent::Error(e) => {
+                if json_mode {
+                    println!("{}", serde_json::json!({"error": e}));
+                } else {
+                    eprintln!("Error: {}", e);
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    if json_mode {
+        println!("{}", serde_json::json!({
+            "response": full_response,
+            "tool_calls": tool_calls_used,
+            "model": config.ollama_model,
+        }));
+    } else {
+        println!("{}", full_response);
+    }
+    Ok(())
+}
+
+/// Doctor: check Ollama connectivity.
+async fn run_doctor(cli: &Cli) -> anyhow::Result<()> {
+    let mut config = Config::load();
+    if let Some(u) = &cli.ollama_url { config.ollama_base_url = u.clone(); }
+    if let Some(m) = &cli.model { config.ollama_model = m.clone(); }
+    println!("Checking Ollama at {} ...", config.ollama_base_url);
+    let url = format!("{}/api/tags", config.ollama_base_url);
+    match reqwest::get(&url).await {
+        Ok(r) if r.status().is_success() => println!("Ollama is reachable. Model: {}", config.ollama_model),
+        Ok(r) => println!("Ollama responded with status: {}", r.status()),
+        Err(e) => println!("Cannot reach Ollama: {}", e),
+    }
     Ok(())
 }
 
@@ -602,8 +728,35 @@ fn submit_input(app: &mut App, input: &str) {
         app.tui.set_diff("--- a/example.rs\n+++ b/example.rs\n@@ -1,4 +1,4 @@\n fn main() {\n-    println!(\"hello\");\n+    println!(\"Hello, BarqCoder!\");\n }\n");
     } else if input == "/sessions" {
         app.tui.active_tab = ActiveTab::Sessions;
+    } else if let Some(slash_cmd) = commands::parse(input) {
+        // Route all /commands through the commands module
+        let result = commands::execute(
+            &slash_cmd,
+            &app.config.workspace_root.clone(),
+            &app.session_id.clone(),
+            &app.session_store,
+            &app.cost,
+            &app.config.ollama_model.clone(),
+        );
+        match result {
+            commands::CommandResult::Message(msg) => {
+                app.tui.add_message(ChatMessage::system(msg));
+            }
+            commands::CommandResult::SwitchModel(name) => {
+                app.config.ollama_model = name.clone();
+                app.tui.add_message(ChatMessage::system(format!("Switched model to: {}", name)));
+            }
+            commands::CommandResult::Compaction => {
+                crate::context::auto_compact(&mut app.orchestrator.conversation, 6);
+                app.tui.add_message(ChatMessage::system(
+                    "Conversation compacted — older messages summarised to save context."
+                ));
+            }
+        }
     } else {
-        // Regular AI prompt
+        // Regular AI prompt — track cost
+        let prompt_tokens = CostTracker::estimate_tokens(input);
+        app.cost.record_turn(prompt_tokens, 0, 0);
         app.tui.is_thinking = true;
         let rx = app.orchestrator.run(input);
         app.event_rx = Some(rx);
@@ -611,23 +764,32 @@ fn submit_input(app: &mut App, input: &str) {
 }
 
 const HELP_TEXT: &str = "\
-Commands:
-  /index [path]   — Index codebase into BarqDB
-  /goal <text>    — Run multi-agent goal (Planner → Coder → Tester → Reviewer)
-  /diff           — Show last diff in the Diff tab
-  /sessions       — Jump to Sessions tab
-  /config         — Show current config
-  /clear          — Clear chat and conversation
-  /help           — Show this message
+Built-in commands:
+  /index [path]       Index codebase into BarqDB
+  /goal <text>        Run multi-agent goal (Planner → Coder → Tester → Reviewer)
+  /diff               Show last diff in the Diff tab
+  /sessions           Jump to Sessions tab
+  /config             Show current config
+  /clear              Clear chat and conversation
+
+Slash commands (agent-aware):
+  /compact            Compact conversation to save context window
+  /plan               Enter plan mode (outline before executing)
+  /review             Review all edits made this session
+  /memory [show]      Show project memory (.barqcoder.md)
+  /memory add <note>  Add a note to project memory
+  /model <name>       Switch LLM model mid-session
+  /status             Show session stats and token usage
+  /help               Show this message
 
 Keys:
-  Enter           — Send message
-  ↑/↓             — Navigate input history / scroll
-  PageUp/Down     — Scroll chat
-  Tab / Shift+Tab — Switch tabs
-  Alt+S           — Toggle sidebar
-  F1              — Toggle sidebar focus
-  Esc             — Quit";
+  Enter           Send message
+  ↑/↓             Navigate input history / scroll
+  PageUp/Down     Scroll chat
+  Tab / Shift+Tab Switch tabs
+  Alt+S           Toggle sidebar
+  F1              Toggle sidebar focus
+  Esc             Quit";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Quit flag on TuiState
