@@ -189,6 +189,8 @@ barqcoder print "explain the auth flow" --json
 | `delegate_task` | Dispatch a goal to the multi-agent swarm |
 | `file_history` | Undo/redo file edits |
 | `tool_search` | Search the tool registry by keyword |
+| `notebook_edit`| Edit Jupyter Notebook (.ipynb) cells natively without breaking JSON structures |
+| `python_repl`  | Execute inline Python code (REPL) and return stdout/stderr |
 
 ---
 
