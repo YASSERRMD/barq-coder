@@ -36,6 +36,15 @@ pub enum SessionEvent {
         patch: String,
         timestamp: u64,
     },
+    #[serde(rename = "verification")]
+    Verification {
+        step_id: String,
+        check_pass: bool,
+        test_pass: bool,
+        approved: bool,
+        diagnostics: Vec<String>,
+        timestamp: u64,
+    },
     #[serde(rename = "compact_boundary")]
     CompactBoundary {
         summary: String,
@@ -85,6 +94,23 @@ impl SessionEvent {
         Self::ToolResult {
             name: name.to_string(),
             result,
+            timestamp: Self::now(),
+        }
+    }
+
+    pub fn verification(
+        step_id: &str,
+        check_pass: bool,
+        test_pass: bool,
+        approved: bool,
+        diagnostics: Vec<String>,
+    ) -> Self {
+        Self::Verification {
+            step_id: step_id.to_string(),
+            check_pass,
+            test_pass,
+            approved,
+            diagnostics,
             timestamp: Self::now(),
         }
     }
