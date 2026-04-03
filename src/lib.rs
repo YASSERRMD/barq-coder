@@ -14,3 +14,4 @@ pub mod tools;
 pub mod symbolic;
 pub mod voice;
 pub mod verifier;
+pub mod memory;

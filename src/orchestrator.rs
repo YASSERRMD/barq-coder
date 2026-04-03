@@ -3,6 +3,7 @@ use crate::barq::BarqIndex;
 use crate::config::Config;
 use crate::tools::ToolRegistry;
 use crate::context::{auto_compact, ContextBudget};
+use crate::memory::Memory;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -75,9 +76,13 @@ impl Orchestrator {
             tool_desc.push_str(&format!("- {}: {}\n", tool.name(), tool.description()));
         }
 
+        let memory = Memory::load(&self.config.workspace_root);
+        let memory_str = memory.to_prompt_block();
+
         format!(
             "You are BarqCoder, a high-performance Rust coding agent powered by BARQDB semantic search.\n\
             \n\
+            {}\n\
             AVAILABLE TOOLS:\n\
             {}\n\
             \n\
@@ -94,7 +99,7 @@ impl Orchestrator {
             4. If cargo_check fails, fix errors before giving a final answer.\n\
             5. When you need to use a tool, respond with tool_calls in the message.\n\
             6. When the task is complete and verified, provide your final answer as plain text.",
-            tool_desc, context_str, deps_str
+            memory_str, tool_desc, context_str, deps_str
         )
     }
 
