@@ -69,6 +69,10 @@ impl BarqIndex {
     pub fn graph_deps(&self, symbol: &str) -> Vec<String> {
         self.graph.neighbors(symbol)
     }
+
+    pub fn get_callers(&self, symbol: &str) -> Vec<String> {
+        self.graph.callers(symbol)
+    }
 }
 
 pub fn parse_barqignore(root: &str) -> Vec<String> {
