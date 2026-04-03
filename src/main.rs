@@ -28,6 +28,7 @@ mod macro_goals;
 mod memory;
 mod orchestrator;
 mod permissions;
+mod sandbox;
 mod session;
 mod symbolic;
 mod tasks;

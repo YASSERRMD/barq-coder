@@ -28,3 +28,5 @@ reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3.32"
 quote = "1.0.45"
 proc-macro2 = "1.0.106"
+async-recursion = "1.1"
+uuid = { version = "1.10", features = ["v4"] }
