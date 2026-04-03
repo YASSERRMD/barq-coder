@@ -1,12 +1,14 @@
 # Build stage
-FROM rust:1.75-slim AS builder
+FROM rust:slim AS builder
 WORKDIR /app
 # Install dependencies
 RUN apt-get update && apt-get install -y pkg-config libssl-dev build-essential
 # Copy manifests
 COPY Cargo.toml Cargo.lock ./
-# Copy source
+# Copy source code and internal components
 COPY src ./src
+COPY components ./components
+COPY tests ./tests
 # Build the application
 RUN cargo build --release
 
