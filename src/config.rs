@@ -24,7 +24,7 @@ pub struct Config {
 }
 
 fn default_ollama_base_url() -> String { "http://localhost:11434".to_string() }
-fn default_ollama_model() -> String { "gemini-pro-3.1".to_string() }
+fn default_ollama_model() -> String { "minimax-m2.7:cloud".to_string() }
 fn default_barqdb_url() -> String { "localhost:6333".to_string() }
 fn default_barqgraph_url() -> String { "localhost:6334".to_string() }
 fn default_workspace_root() -> String { "./".to_string() }

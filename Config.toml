@@ -1,5 +1,5 @@
 ollama_base_url = "http://localhost:11434"
-ollama_model = "gemini-pro-3.1"
+ollama_model = "minimax-m2.7:cloud"
 barqdb_url = "localhost:6333"
 barqgraph_url = "localhost:6334"
 workspace_root = "./"

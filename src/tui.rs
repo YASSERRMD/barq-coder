@@ -1097,6 +1097,51 @@ fn draw_input(f: &mut Frame, area: Rect, state: &TuiState) {
         f.render_widget(Clear, status_area);
         f.render_widget(overlay, status_area);
     }
+
+    // Autocomplete popup for '/' commands
+    if is_focused && state.input.starts_with('/') {
+        let commands = vec![
+            "/help     - Show help message",
+            "/clear    - Clear conversation",
+            "/config   - Display current config",
+            "/goal     - Start a multi-agent goal",
+            "/diff     - Show active diff patch",
+            "/sessions - Switch to sessions tab",
+        ];
+
+        let matched: Vec<&str> = commands.iter()
+            .filter(|c| c.starts_with(&state.input))
+            .map(|c| *c)
+            .collect();
+
+        if !matched.is_empty() && state.input.len() > 0 {
+            let popup_height = matched.len() as u16 + 2;
+            let popup_width = 40;
+            // Place just above the input box
+            let popup_area = Rect {
+                x: area.x + 2,
+                y: area.y.saturating_sub(popup_height),
+                width: popup_width,
+                height: popup_height,
+            };
+
+            let items: Vec<Line> = matched.into_iter().map(|c| {
+                Line::from(Span::styled(c, Style::default().fg(Palette::TEXT_BRIGHT)))
+            }).collect();
+
+            let popup = Paragraph::new(items)
+                .block(
+                    Block::default()
+                        .title(" Commands ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Palette::ACCENT))
+                        .style(Style::default().bg(Palette::SURFACE2)),
+                );
+
+            f.render_widget(Clear, popup_area);
+            f.render_widget(popup, popup_area);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────
