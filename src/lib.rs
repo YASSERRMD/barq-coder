@@ -1,18 +1,19 @@
-#![allow(unused)]
-
 pub mod agent;
 pub mod agents;
 pub mod barq;
 pub mod config;
 pub mod context;
 pub mod collab;
+pub mod cost_tracker;
 pub mod lsp;
+pub mod macro_goals;
+pub mod memory;
 pub mod orchestrator;
 pub mod permissions;
+pub mod sandbox;
 pub mod session;
+pub mod tasks;
 pub mod tools;
 pub mod symbolic;
-pub mod voice;
 pub mod verifier;
-pub mod memory;
-pub mod tasks;
+pub mod voice;
