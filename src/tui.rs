@@ -57,6 +57,7 @@ pub enum ActiveTab {
     Chat = 0,
     Diff = 1,
     Sessions = 2,
+    ActionQueue = 3,
 }
 
 impl ActiveTab {
@@ -64,14 +65,16 @@ impl ActiveTab {
         match self {
             Self::Chat => Self::Diff,
             Self::Diff => Self::Sessions,
-            Self::Sessions => Self::Chat,
+            Self::Sessions => Self::ActionQueue,
+            Self::ActionQueue => Self::Chat,
         }
     }
     pub fn prev(self) -> Self {
         match self {
-            Self::Chat => Self::Sessions,
+            Self::Chat => Self::ActionQueue,
             Self::Diff => Self::Chat,
             Self::Sessions => Self::Diff,
+            Self::ActionQueue => Self::Sessions,
         }
     }
 }
@@ -128,6 +131,60 @@ impl ChatMessage {
 }
 
 // ─────────────────────────────────────────────
+// Pending agent action — queued for user review
+// ─────────────────────────────────────────────
+#[derive(Clone, Debug)]
+pub enum ActionKind {
+    /// Write or overwrite a file with the given content.
+    WriteFile {
+        path: String,
+        patch: String,
+        full_content: String,
+    },
+    /// Run a shell command (requires explicit user approval).
+    ShellCommand { command: String, reason: String },
+    /// Apply a verified patch from the VerificationGate.
+    ApplyVerifiedPatch { patch: String, step_id: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingAction {
+    pub kind: ActionKind,
+    pub agent: String,
+    pub approved: Option<bool>,
+}
+
+impl PendingAction {
+    pub fn write_file(path: impl Into<String>, patch: impl Into<String>, full_content: impl Into<String>, agent: impl Into<String>) -> Self {
+        Self { kind: ActionKind::WriteFile { path: path.into(), patch: patch.into(), full_content: full_content.into() }, agent: agent.into(), approved: None }
+    }
+
+    pub fn shell_cmd(command: impl Into<String>, reason: impl Into<String>, agent: impl Into<String>) -> Self {
+        Self { kind: ActionKind::ShellCommand { command: command.into(), reason: reason.into() }, agent: agent.into(), approved: None }
+    }
+
+    pub fn verified_patch(patch: impl Into<String>, step_id: impl Into<String>, agent: impl Into<String>) -> Self {
+        Self { kind: ActionKind::ApplyVerifiedPatch { patch: patch.into(), step_id: step_id.into() }, agent: agent.into(), approved: None }
+    }
+
+    pub fn label(&self) -> String {
+        match &self.kind {
+            ActionKind::WriteFile { path, .. } => format!("Write: {}", path),
+            ActionKind::ShellCommand { command, .. } => format!("Shell: {}", &command[..command.len().min(60)]),
+            ActionKind::ApplyVerifiedPatch { step_id, .. } => format!("Patch (verified): {}", step_id),
+        }
+    }
+
+    pub fn preview(&self) -> &str {
+        match &self.kind {
+            ActionKind::WriteFile { patch, .. } => patch,
+            ActionKind::ShellCommand { reason, .. } => reason,
+            ActionKind::ApplyVerifiedPatch { patch, .. } => patch,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
 // Session entry for the Sessions tab
 // ─────────────────────────────────────────────
 #[derive(Clone, Debug)]
@@ -173,6 +230,11 @@ pub struct TuiState {
     pub diff_content: Vec<String>,
     pub diff_scroll: usize,
 
+    // Action Sandbox (Phase 3)
+    pub action_queue: Vec<PendingAction>,
+    pub action_queue_selected: usize,
+    pub action_preview_scroll: usize,
+
     // Sessions
     pub sessions: Vec<SessionEntry>,
     pub session_list_state: ListState,
@@ -216,6 +278,9 @@ impl TuiState {
             barq_context: Vec::new(),
             diff_content: Vec::new(),
             diff_scroll: 0,
+            action_queue: Vec::new(),
+            action_queue_selected: 0,
+            action_preview_scroll: 0,
             sessions: Vec::new(),
             session_list_state: {
                 let mut s = ListState::default();
@@ -429,6 +494,11 @@ fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
             Span::styled("󱁻 Sessions", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" "),
         ]),
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("󰒄 Sandbox", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!(" [{}]", state.action_queue.len())),
+        ]),
     ];
 
     let tabs = Tabs::new(tab_titles)
@@ -514,6 +584,7 @@ fn draw_body(f: &mut Frame, area: Rect, state: &mut TuiState) {
         ActiveTab::Chat => draw_chat_tab(f, area, state),
         ActiveTab::Diff => draw_diff_tab(f, area, state),
         ActiveTab::Sessions => draw_sessions_tab(f, area, state),
+        ActiveTab::ActionQueue => draw_action_queue_tab(f, area, state),
     }
 }
 
@@ -1217,6 +1288,106 @@ fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
 }
 
 // ─────────────────────────────────────────────
+// Action Queue (Sandbox) tab
+// ─────────────────────────────────────────────
+fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
+    if state.action_queue.is_empty() {
+        let placeholder = Paragraph::new(vec![
+            Line::raw(""),
+            Line::from(Span::styled(
+                "  No pending actions in the sandbox.",
+                Style::default()
+                    .fg(Palette::TEXT_DIM)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            Line::raw(""),
+        ])
+        .block(
+            Block::default()
+                .title(Line::from(Span::styled(
+                    " 󰒄 Sandbox ",
+                    Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+                )))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Palette::BORDER))
+                .style(Style::default().bg(Palette::SURFACE)),
+        )
+        .alignment(Alignment::Center);
+        f.render_widget(placeholder, area);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(area);
+
+    let items: Vec<ListItem> = state.action_queue.iter().map(|a| {
+        let icon = match a.kind {
+            ActionKind::WriteFile { .. } => "📝",
+            ActionKind::ShellCommand { .. } => "💻",
+            ActionKind::ApplyVerifiedPatch { .. } => "✅",
+        };
+        let status = match a.approved {
+            Some(true) => Span::styled(" [Approved]", Style::default().fg(Palette::STATUS_OK)),
+            Some(false) => Span::styled(" [Rejected]", Style::default().fg(Palette::STATUS_ERR)),
+            None => Span::styled(" [Pending]", Style::default().fg(Palette::STATUS_WARN)),
+        };
+        ListItem::new(Line::from(vec![
+            Span::raw(format!("{} ", icon)),
+            Span::styled(a.label(), Style::default().fg(Palette::TEXT_BRIGHT)),
+            status,
+        ]))
+    }).collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" Pending Actions ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Palette::BORDER))
+                .style(Style::default().bg(Palette::SURFACE)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Palette::SURFACE2)
+                .fg(Palette::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.action_queue_selected));
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    let preview_text = state.action_queue[state.action_queue_selected].preview().lines().enumerate().map(|(i, l)| {
+        let style = if l.starts_with('+') {
+            Style::default().fg(Palette::DIFF_ADD)
+        } else if l.starts_with('-') {
+            Style::default().fg(Palette::DIFF_DEL)
+        } else if l.starts_with("@@") {
+            Style::default().fg(Palette::DIFF_HUNK)
+        } else {
+            Style::default().fg(Palette::TEXT)
+        };
+        Line::from(Span::styled(l, style))
+    }).collect::<Vec<_>>();
+
+    let preview = Paragraph::new(preview_text)
+        .block(
+            Block::default()
+                .title(" Preview ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Palette::BORDER))
+                .style(Style::default().bg(Palette::BG)),
+        )
+        .scroll((state.action_preview_scroll as u16, 0));
+
+    f.render_widget(preview, chunks[1]);
+}
+
+// ─────────────────────────────────────────────
 // Keybindings bar
 // ─────────────────────────────────────────────
 fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
@@ -1237,6 +1408,14 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
         ActiveTab::Sessions => &[
             ("↑/↓", "Select"),
             ("Enter", "Replay"),
+            ("Tab", "Next Tab"),
+            ("Esc", "Quit"),
+        ],
+        ActiveTab::ActionQueue => &[
+            ("↑/↓", "Select"),
+            ("PgUp/Dn", "Scroll Preview"),
+            ("Y", "Approve"),
+            ("N", "Reject"),
             ("Tab", "Next Tab"),
             ("Esc", "Quit"),
         ],
