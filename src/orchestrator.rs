@@ -278,7 +278,7 @@ impl Orchestrator {
 
                         let tool_specific = tool.check_permissions(tool_args);
                         if !matches!(perm_res, crate::tools::PermissionResult::Deny(_)) {
-                            perm_res = permissions.check_tool_call(tool_name, tool.is_destructive(), tool_specific);
+                            perm_res = permissions.check_tool_call(tool_name, tool.risk(), tool_specific, tool_args);
                         }
 
                         if let crate::tools::PermissionResult::Deny(r) = perm_res {
