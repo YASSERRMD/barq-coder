@@ -21,9 +21,13 @@ impl Tool for ShellExec {
         json!({
             "command": "string",
             "working_dir": "string",
-            "timeout_secs": "number"
+            "timeout_secs": "number",
+            "dry_run": "boolean" // Phase 4 Safe Mode
         })
     }
+
+    fn is_destructive(&self) -> bool { true } // Shell commands are considered Destructive by default unless checked
+    fn is_read_only(&self) -> bool { false }
 
     async fn call(&self, args: Value) -> anyhow::Result<Value> {
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
@@ -32,6 +36,7 @@ impl Tool for ShellExec {
             .and_then(|v| v.as_str())
             .unwrap_or(".");
         let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(30);
+        let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
         let timeout_secs = std::cmp::min(timeout_secs, 60);
 
         let command_str = command.to_string();
@@ -40,6 +45,15 @@ impl Tool for ShellExec {
             if command_str.contains(blocked) {
                 return Err(anyhow::anyhow!("Blocked command detected: {}", blocked));
             }
+        }
+
+        if dry_run {
+            return Ok(json!({
+                "stdout": format!("[Dry Run] Would execute: {} in {}", command_str, working_dir),
+                "stderr": "",
+                "exit_code": 0,
+                "timed_out": false
+            }));
         }
 
         let mut cmd = Command::new("sh");
@@ -86,17 +100,29 @@ impl Tool for GitTool {
     fn schema(&self) -> Value {
         json!({
             "operation": "string",
-            "args": "string"
+            "args": "string",
+            "dry_run": "boolean"
         })
     }
+
+    fn is_destructive(&self) -> bool { false } // Basic tracking operations only, mostly Mutating
+    fn is_read_only(&self) -> bool { false }
 
     async fn call(&self, args: Value) -> anyhow::Result<Value> {
         let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("");
         let cmd_args = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
+        let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let valid_ops = ["status", "diff", "log", "add", "commit"];
         if !valid_ops.contains(&op) {
             return Err(anyhow::anyhow!("Invalid git operation: {}", op));
+        }
+
+        if dry_run {
+            return Ok(json!({
+                "output": format!("[Dry Run] Would run: git {} {}", op, cmd_args),
+                "success": true
+            }));
         }
 
         let mut cmd = Command::new("git");

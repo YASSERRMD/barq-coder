@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use crate::tools::PermissionResult;
+use crate::tools::{CommandRisk, PermissionResult};
 
 /// Permission scope tracks auto-allowed tools and paths.
 /// Inspired by Claude Code's auto-approval system.
@@ -9,6 +9,7 @@ pub struct PermissionManager {
     auto_allowed_tools: HashSet<String>,
     allowed_dirs: HashSet<PathBuf>,
     blocked_dirs: HashSet<PathBuf>,
+    blocked_command_patterns: Vec<String>,
 }
 
 impl PermissionManager {
@@ -22,12 +23,19 @@ impl PermissionManager {
         blocked.insert(PathBuf::from("/usr/bin"));
         blocked.insert(PathBuf::from("/usr/sbin"));
         blocked.insert(PathBuf::from("/var/run"));
+        let blocked_patterns = vec![
+            "rm -rf /".to_string(),
+            "mkfs".to_string(),
+            "dd if=".to_string(),
+            "> /dev/sda".to_string(),
+        ];
         
         Self {
             workspace_root: root,
             auto_allowed_tools: HashSet::new(),
             allowed_dirs: HashSet::new(),
             blocked_dirs: blocked,
+            blocked_command_patterns: blocked_patterns,
         }
     }
 
@@ -81,7 +89,24 @@ impl PermissionManager {
     }
 
     /// Ask if a tool is allowed to execute.
-    pub fn check_tool_call(&self, tool_name: &str, is_destructive: bool, tool_specific_result: PermissionResult) -> PermissionResult {
+    pub fn check_tool_call(
+        &self,
+        tool_name: &str,
+        risk: CommandRisk,
+        tool_specific_result: PermissionResult,
+        args: &serde_json::Value,
+    ) -> PermissionResult {
+        // Evaluate command patterns for shell execution
+        if tool_name == "shell_exec" {
+            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                for pattern in &self.blocked_command_patterns {
+                    if cmd.contains(pattern) {
+                        return PermissionResult::Deny(format!("Command matches blocked pattern: '{}'", pattern));
+                    }
+                }
+            }
+        }
+
         // If the tool specifically denies, respect it unconditionally
         if matches!(tool_specific_result, PermissionResult::Deny(_)) {
             return tool_specific_result;
@@ -98,8 +123,11 @@ impl PermissionManager {
         }
 
         // Destructive tools must either be auto-whitelisted or explicitly asked
-        if is_destructive {
-            return PermissionResult::Ask(format!("Tool '{}' makes destructive changes. Auto-allow for this session?", tool_name));
+        if risk == CommandRisk::Destructive {
+            return PermissionResult::Ask(format!(
+                "Tool '{}' makes destructive changes. Auto-allow for this session?",
+                tool_name
+            ));
         }
 
         PermissionResult::Allow

@@ -43,6 +43,20 @@ pub enum ValidationResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Risk classification for sandboxing and explicit safe mode.
+// ─────────────────────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandRisk {
+    /// Read-only operation, safe to run without specific approval.
+    ReadOnly,
+    /// Mutates state (writes to files, builds things) but is not necessarily destructive.
+    Mutating,
+    /// Destructive operation (rm, drop, massive rewrites, remote execution).
+    /// Requires explicit elevated permission.
+    Destructive,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tool metadata — describes capabilities and limits for the harness.
 // ─────────────────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone)]
@@ -96,6 +110,17 @@ pub trait Tool: Send + Sync {
 
     /// Whether the tool performs irreversible / destructive operations.
     fn is_destructive(&self) -> bool { false }
+
+    /// Return the risk classification of the tool.
+    fn risk(&self) -> CommandRisk {
+        if self.is_destructive() {
+             CommandRisk::Destructive
+        } else if self.is_read_only() {
+             CommandRisk::ReadOnly
+        } else {
+             CommandRisk::Mutating
+        }
+    }
 
     /// Metadata for the tool harness.
     fn metadata(&self) -> ToolMetadata { ToolMetadata::default() }
