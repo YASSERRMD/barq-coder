@@ -61,6 +61,7 @@ struct App {
     session_store: SessionStore,
     session_id: String,
     pending_permission_request: Option<tokio::sync::oneshot::Sender<bool>>,
+    pending_budget_request: Option<tokio::sync::oneshot::Sender<bool>>,
     cost: CostTracker,
     skip_permissions: bool,
 }
@@ -170,6 +171,7 @@ impl App {
             session_store,
             session_id,
             pending_permission_request: None,
+            pending_budget_request: None,
             cost: CostTracker::new(),
             skip_permissions: cli.dangerously_skip_permissions,
         }
@@ -426,6 +428,24 @@ async fn run_app<B: ratatui::backend::Backend>(
                         )));
                         app.pending_permission_request = Some(tx);
                     }
+                    OrchestratorEvent::BudgetWarning { used_usd, cap_usd, pct } => {
+                        app.tui.set_status(
+                            format!("⚠ Budget: ${:.4} / ${:.2} ({}%)", used_usd, cap_usd, pct),
+                            false,
+                        );
+                    }
+                    OrchestratorEvent::BudgetPaused { used_usd, cap_usd, tx } => {
+                        app.tui.is_thinking = false;
+                        app.tui.add_message(ChatMessage::system(format!(
+                            "Budget cap reached! Used ${:.4} of ${:.2}.\nPress [Y] to continue anyway or [N] to stop.",
+                            used_usd, cap_usd
+                        )));
+                        app.tui.set_status(
+                            format!("BUDGET CAP: ${:.4} / ${:.2}", used_usd, cap_usd),
+                            true,
+                        );
+                        app.pending_budget_request = Some(tx);
+                    }
                     OrchestratorEvent::Done(answer) => {
                         app.tui.is_thinking = false;
                         app.tui.current_tool = None;
@@ -493,6 +513,26 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
             if let Some(tx) = app.pending_permission_request.take() {
                 let _ = tx.send(false);
                 app.tui.add_message(ChatMessage::system("Permission denied."));
+            }
+            return;
+        }
+    }
+
+    // Intercept Y/N if waiting for budget confirmation
+    if app.pending_budget_request.is_some() {
+        if let KeyCode::Char('y') | KeyCode::Char('Y') = key {
+            if let Some(tx) = app.pending_budget_request.take() {
+                let _ = tx.send(true);
+                app.tui.add_message(ChatMessage::system("Budget override: continuing."));
+                app.tui.is_thinking = true;
+            }
+            return;
+        }
+        if let KeyCode::Char('n') | KeyCode::Char('N') = key {
+            if let Some(tx) = app.pending_budget_request.take() {
+                let _ = tx.send(false);
+                app.tui.add_message(ChatMessage::system("Stopped. Budget cap enforced."));
+                app.event_rx = None;
             }
             return;
         }

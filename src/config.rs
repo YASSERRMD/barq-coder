@@ -18,6 +18,9 @@ pub struct Config {
     pub max_iterations: u8,
     #[serde(default = "default_token_limit")]
     pub token_limit: u32,
+    /// Optional hard budget cap in USD. None = unlimited.
+    #[serde(default)]
+    pub budget_cap_usd: Option<f64>,
 }
 
 fn default_ollama_base_url() -> String { "http://localhost:11434".to_string() }
@@ -38,6 +41,7 @@ impl Default for Config {
             workspace_root: default_workspace_root(),
             max_iterations: default_max_iterations(),
             token_limit: default_token_limit(),
+            budget_cap_usd: None,
         }
     }
 }

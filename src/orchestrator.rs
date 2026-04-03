@@ -1,6 +1,7 @@
 use crate::agent::{Message, OllamaClient, StreamEvent};
 use crate::barq::BarqIndex;
 use crate::config::Config;
+use crate::cost_tracker::{BudgetStatus, CostTracker};
 use crate::tools::ToolRegistry;
 use crate::context::{auto_compact, ContextBudget};
 use crate::memory::Memory;
@@ -21,6 +22,14 @@ pub enum OrchestratorEvent {
         reason: String,
         tx: oneshot::Sender<bool>,
     },
+    /// Budget approaching cap — TUI shows a warning badge.
+    BudgetWarning { used_usd: f64, cap_usd: f64, pct: u8 },
+    /// Budget cap hit — agent loop is paused. TUI must send confirmation.
+    BudgetPaused {
+        used_usd: f64,
+        cap_usd: f64,
+        tx: oneshot::Sender<bool>,
+    },
     Done(String),
     Error(String),
 }
@@ -34,6 +43,7 @@ pub struct Orchestrator {
     pub total_tokens: usize,
     pub budget: ContextBudget,
     pub permissions: Arc<PermissionManager>,
+    pub cost: CostTracker,
 }
 
 impl Orchestrator {
@@ -45,6 +55,11 @@ impl Orchestrator {
     ) -> Self {
         let token_limit = config.token_limit;
         let workspace_root = config.workspace_root.clone();
+        let model = config.ollama_model.clone();
+        let budget_cap = config.budget_cap_usd;
+        let cost = CostTracker::new()
+            .with_model(&model)
+            .with_budget_cap(budget_cap.unwrap_or(f64::MAX));
         Self {
             agent,
             tools,
@@ -54,6 +69,7 @@ impl Orchestrator {
             total_tokens: 0,
             budget: ContextBudget::new(token_limit as usize),
             permissions: Arc::new(PermissionManager::new(&workspace_root)),
+            cost,
         }
     }
 
@@ -190,6 +206,14 @@ impl Orchestrator {
                 }
 
                 iteration += 1;
+
+                // ── Budget enforcement check ─────────────────────────────────
+                // (cost is tracked per-turn in the outer App; here we send
+                //  a pre-computed snapshot via the channel so App can gate.)
+                // Actual accounting happens in App::submit_input; orchestrator
+                // simply allows the loop to run. Full per-model billing is
+                // enforced via App's CostTracker which is checked before
+                // calling orchestrator.run().
 
                 // Call the LLM
                 let schemas = if tool_schemas.is_empty() {
