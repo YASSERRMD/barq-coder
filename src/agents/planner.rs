@@ -7,7 +7,7 @@ pub struct PlannerAgent {
     pub barq: Arc<BarqIndex>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct PlanStep {
     pub id: String,
     pub description: String,
@@ -28,30 +28,56 @@ impl PlannerAgent {
         }
 
         let prompt = format!(
-            "Goal: {}\n\nContext:\n{}\n\nDecompose the goal into logical steps that can be independently built. Output strictly JSON with a 'steps' array. Each step should have an 'id', 'description', and 'dependencies' array of ids.",
+            "Goal: {}\n\nContext:\n{}\n\nDecompose the goal into logical steps that can be independently built. Maximize parallelization. Break components apart so they share minimal dependencies and can be built concurrently. Output strictly JSON with a 'steps' array of objects containing 'id' (string), 'description' (string), and 'dependencies' (array of string ids). Do not output markdown code blocks, just raw JSON.",
             goal, context_str
         );
 
-        // In a real implementation this would call `self.llm.chat_stream` and aggregate.
-        // For now, we mock a standard plan.
-        let _ = prompt; // Use prompt
-        
-        Ok(vec![
-            PlanStep {
-                id: "step_1".to_string(),
-                description: "Analyze dependencies and create a structural outline".to_string(),
-                dependencies: vec![],
+        let messages = vec![
+            rusty_ollama::ChatMessage {
+                role: "system".to_string(),
+                content: crate::agents::AgentRole::Planner.system_prompt().to_string(),
+                tool_calls: None,
             },
-            PlanStep {
-                id: "step_2".to_string(),
-                description: "Implement core logic based on outline".to_string(),
-                dependencies: vec!["step_1".to_string()],
-            },
-            PlanStep {
-                id: "step_3".to_string(),
-                description: "Write tests to verify core logic".to_string(),
-                dependencies: vec!["step_2".to_string()],
+            rusty_ollama::ChatMessage {
+                role: "user".to_string(),
+                content: prompt,
+                tool_calls: None,
             }
-        ])
+        ];
+
+        let mut rx = self.llm.chat_stream(messages, None);
+        let mut final_response = String::new();
+        
+        use crate::agent::StreamEvent;
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::Token(text) => final_response.push_str(&text),
+                StreamEvent::Done => break,
+                StreamEvent::Error(e) => return Err(anyhow::anyhow!("Planner LLM error: {}", e)),
+                _ => {}
+            }
+        }
+
+        // Try to extract JSON if it was wrapped in a block
+        let mut json_str = final_response.as_str();
+        if let Some(start) = json_str.find('{') {
+            if let Some(end) = json_str.rfind('}') {
+                json_str = &json_str[start..=end];
+            }
+        }
+
+        #[derive(serde::Deserialize)]
+        struct PlanResponse {
+            steps: Vec<PlanStep>,
+        }
+
+        let parsed: PlanResponse = serde_json::from_str(json_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse planner JSON: {}\nResponse was: {}", e, final_response))?;
+
+        if parsed.steps.is_empty() {
+             return Err(anyhow::anyhow!("Planner returned empty steps array"));
+        }
+
+        Ok(parsed.steps)
     }
 }
