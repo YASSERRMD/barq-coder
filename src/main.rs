@@ -565,6 +565,7 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
         ActiveTab::Chat => handle_chat_keys(app, key, mods),
         ActiveTab::Diff => handle_diff_keys(app, key),
         ActiveTab::Sessions => handle_sessions_keys(app, key),
+        ActiveTab::ActionQueue => handle_action_queue_keys(app, key),
     }
 }
 
@@ -692,6 +693,41 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                     }
                     app.tui.active_tab = ActiveTab::Chat;
                 }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_action_queue_keys(app: &mut App, key: KeyCode) {
+    let len = app.tui.action_queue.len();
+    if len == 0 {
+        return;
+    }
+    match key {
+        KeyCode::Up => {
+            app.tui.action_queue_selected = app.tui.action_queue_selected.saturating_sub(1);
+            app.tui.action_preview_scroll = 0;
+        }
+        KeyCode::Down => {
+            app.tui.action_queue_selected = (app.tui.action_queue_selected + 1).min(len - 1);
+            app.tui.action_preview_scroll = 0;
+        }
+        KeyCode::PageUp => {
+            app.tui.action_preview_scroll = app.tui.action_preview_scroll.saturating_sub(20);
+        }
+        KeyCode::PageDown => {
+            app.tui.action_preview_scroll += 20;
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(action) = app.tui.action_queue.get_mut(app.tui.action_queue_selected) {
+                action.approved = Some(true);
+                // Implementation of user approval application will happen asynchronously in a background task monitoring the queue.
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            if let Some(action) = app.tui.action_queue.get_mut(app.tui.action_queue_selected) {
+                action.approved = Some(false);
             }
         }
         _ => {}
