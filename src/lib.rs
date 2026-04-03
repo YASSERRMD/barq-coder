@@ -15,3 +15,4 @@ pub mod symbolic;
 pub mod voice;
 pub mod verifier;
 pub mod memory;
+pub mod tasks;

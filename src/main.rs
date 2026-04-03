@@ -30,6 +30,7 @@ mod orchestrator;
 mod permissions;
 mod session;
 mod symbolic;
+mod tasks;
 mod tools;
 mod tui;
 mod verifier;
@@ -78,6 +79,11 @@ impl App {
             agent.clone(),
             Arc::clone(&barq),
         )));
+        let task_board = Arc::new(crate::tasks::TaskBoard::new());
+        tools_mut.register(Box::new(crate::tools::task_tools::TaskCreateTool::new(Arc::clone(&task_board))));
+        tools_mut.register(Box::new(crate::tools::task_tools::TaskUpdateTool::new(Arc::clone(&task_board))));
+        tools_mut.register(Box::new(crate::tools::task_tools::TaskListTool::new(Arc::clone(&task_board))));
+
         let tools = Arc::new(tools_mut);
         let orchestrator = Orchestrator::new(
             agent.clone(),
@@ -316,7 +322,16 @@ async fn run_headless(prompt: &str, json_mode: bool, cli: &Cli) -> anyhow::Resul
 
     let agent = OllamaClient::new(&config.ollama_base_url, &config.ollama_model);
     let barq = Arc::new(BarqIndex::new(&config)?);
-    let tools = Arc::new(ToolRegistry::with_barq(Arc::clone(&barq)));
+    let mut tools_mut = ToolRegistry::with_barq(Arc::clone(&barq));
+    tools_mut.register(Box::new(crate::tools::delegate::DelegateTask::new(
+        agent.clone(),
+        Arc::clone(&barq),
+    )));
+    let task_board = Arc::new(crate::tasks::TaskBoard::new());
+    tools_mut.register(Box::new(crate::tools::task_tools::TaskCreateTool::new(Arc::clone(&task_board))));
+    tools_mut.register(Box::new(crate::tools::task_tools::TaskUpdateTool::new(Arc::clone(&task_board))));
+    tools_mut.register(Box::new(crate::tools::task_tools::TaskListTool::new(Arc::clone(&task_board))));
+    let tools = Arc::new(tools_mut);
     let mut orch = Orchestrator::new(agent, tools, barq, config.clone());
     let rx = orch.run(prompt);
     let mut full_response = String::new();
