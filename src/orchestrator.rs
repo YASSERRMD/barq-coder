@@ -114,10 +114,11 @@ impl Orchestrator {
             \n\
             RULES:\n\
             1. ALWAYS reference the BARQ context before suggesting code changes.\n\
-            2. Use tools in this order: barq_search -> edit_file -> cargo_check.\n\
-            3. NEVER apply edits without running cargo_check afterward.\n\
-            4. If cargo_check fails, fix errors before giving a final answer.\n\
-            5. When you need to use a tool, respond with tool_calls in the message.\n\
+            2. When asked to write code or create an application, YOU MUST use the `shell_exec` or `edit_file` tools to write it to the filesystem. NEVER output raw implementation code directly in the chat.\n\
+            3. Use tools in this order: barq_search -> edit_file -> cargo_check.\n\
+            4. NEVER apply edits without running cargo_check afterward (if a rust project).\n\
+            5. If cargo_check fails, fix errors before giving a final answer.\n\
+            6. When you need to use a tool, respond with tool_calls in the message.\n\
             \n\
             {}\n\
             \n\

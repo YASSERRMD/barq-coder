@@ -303,7 +303,7 @@ impl TuiState {
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
         // auto-scroll to bottom
-        self.chat_scroll = self.messages.len().saturating_sub(1);
+        self.chat_scroll = usize::MAX;
     }
 
     pub fn append_agent_token(&mut self, token: &str) {
@@ -315,7 +315,7 @@ impl TuiState {
                 self.messages.push(ChatMessage::agent(token));
             }
         }
-        self.chat_scroll = self.messages.len().saturating_sub(1);
+        self.chat_scroll = usize::MAX;
     }
 
     pub fn set_diff(&mut self, patch: &str) {
@@ -868,8 +868,11 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let available_height = area.height.saturating_sub(2) as usize;
     let scroll = if total_lines > available_height {
         // auto-follow bottom unless user has scrolled up
-        if state.chat_scroll + available_height >= total_lines {
-            total_lines.saturating_sub(available_height)
+        if state.chat_scroll == usize::MAX || state.chat_scroll + available_height >= total_lines {
+            // Update state so internal offset isn't left at MAX
+            let bottom = total_lines.saturating_sub(available_height);
+            state.chat_scroll = bottom;
+            bottom
         } else {
             state.chat_scroll
         }
@@ -1069,7 +1072,8 @@ fn draw_input(f: &mut Frame, area: Rect, state: &TuiState) {
                 })
                 .border_style(Style::default().fg(border_color))
                 .style(Style::default().bg(Palette::SURFACE)),
-        );
+        )
+        .wrap(Wrap { trim: false });
     f.render_widget(input_p, area);
 
     // Status bar inside input area (top-right corner)
