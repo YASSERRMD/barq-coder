@@ -55,7 +55,7 @@ Complex goals are decomposed by a `PlannerAgent` into a dependency DAG. Steps wh
 Workspace files are indexed into a vector database for semantic search. The orchestrator automatically injects relevant code snippets into the system prompt before each turn.
 
 **Permission System**
-Every tool call is checked against a path sandbox and allowed/denied list. Destructive operations pause the agent and prompt the user interactively in the TUI (`[Y]es / [N]o`). CI environments can bypass with `--dangerously-skip-permissions`.
+Every tool call is checked against a path sandbox and allowed/denied list. Destructive operations pause the agent and prompt the user interactively in the TUI. Use `[Y]` to approve once, `[A]` to remember the matching scope like Claude Code (`accept edits for this session` or save an exact local bash/git allow rule in `.claude/settings.local.json`), or `[N]` to deny. CI environments can bypass with `--dangerously-skip-permissions`.
 
 **Project Memory**
 Agent-relevant instructions are persisted in `.barqcoder.md` at the workspace root. These are loaded automatically and injected into every system prompt — similar to Claude Code's `CLAUDE.md`.
@@ -166,7 +166,7 @@ barqcoder print "explain the auth flow" --json
 | `Tab / Shift+Tab` | Switch tabs (Chat / Diff / Sessions) |
 | `Alt+S` | Toggle file sidebar |
 | `F1` | Focus sidebar |
-| `Y / N` | Approve or deny a tool permission request |
+| `Y / A / N` | Approve once, remember, or deny a tool permission request |
 | `Esc` | Quit |
 
 ---
