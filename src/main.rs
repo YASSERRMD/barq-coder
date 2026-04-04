@@ -62,7 +62,7 @@ struct App {
     event_rx: Option<mpsc::Receiver<OrchestratorEvent>>,
     session_store: SessionStore,
     session_id: String,
-    pending_permission_request: Option<tokio::sync::oneshot::Sender<bool>>,
+    pending_permission_requests: std::collections::VecDeque<(String, serde_json::Value, String, tokio::sync::oneshot::Sender<bool>)>,
     pending_budget_request: Option<tokio::sync::oneshot::Sender<bool>>,
     cost: CostTracker,
     skip_permissions: bool,
@@ -172,7 +172,7 @@ impl App {
             event_rx: None,
             session_store,
             session_id,
-            pending_permission_request: None,
+            pending_permission_requests: std::collections::VecDeque::new(),
             pending_budget_request: None,
             cost: CostTracker::new(),
             skip_permissions: cli.dangerously_skip_permissions,
@@ -424,11 +424,25 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     OrchestratorEvent::PermissionRequested { name, args, reason, tx } => {
                         app.tui.current_tool = None;
-                        app.tui.add_message(ChatMessage::system(format!(
-                            "Permission requested for tool '{}': {}\nPress [Y] to allow or [N] to deny.",
-                            name, reason
-                        )));
-                        app.pending_permission_request = Some(tx);
+
+                        if app.skip_permissions {
+                            // Auto-approve immediately
+                            let _ = tx.send(true);
+                            app.tui.tool_log.push(format!("Auto-approved: {} (skip_permissions)", name));
+                        } else {
+                            // Pause thinking so user knows we need input
+                            app.tui.is_thinking = false;
+                            app.pending_permission_requests.push_back((name.clone(), args.clone(), reason.clone(), tx));
+
+                            // Show prompt for the first queued request
+                            if app.pending_permission_requests.len() == 1 {
+                                app.tui.add_message(ChatMessage::system(format!(
+                                    ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
+                                    name, reason
+                                )));
+                                app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", name), false);
+                            }
+                        }
                     }
                     OrchestratorEvent::BudgetWarning { used_usd, cap_usd, pct } => {
                         app.tui.set_status(
@@ -502,41 +516,85 @@ async fn run_app<B: ratatui::backend::Backend>(
 // Key handling
 // ─────────────────────────────────────────────────────────────────────────────
 fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
-    // Intercept Y/N if waiting for permission
-    if app.pending_permission_request.is_some() {
-        if let KeyCode::Char('y') | KeyCode::Char('Y') = key {
-            if let Some(tx) = app.pending_permission_request.take() {
-                let _ = tx.send(true);
-                app.tui.add_message(ChatMessage::system("Permission granted."));
+    // ── PERMISSION GATE ─────────────────────────────────────────────────
+    // When there are pending permission requests, ALL key input is
+    // captured here. Only Y, N, and Esc are accepted. Every other key
+    // is swallowed so that the user MUST respond before continuing.
+    if !app.pending_permission_requests.is_empty() {
+        match key {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
+                    let _ = tx.send(true);
+                    app.tui.add_message(ChatMessage::system(format!("Approved: {}", name)));
+                    app.tui.clear_status();
+
+                    if app.pending_permission_requests.is_empty() {
+                        app.tui.is_thinking = true;
+                    } else if let Some((next_name, _, next_reason, _)) = app.pending_permission_requests.front() {
+                        app.tui.add_message(ChatMessage::system(format!(
+                            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
+                            next_name, next_reason
+                        )));
+                        app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", next_name), false);
+                    }
+                }
+                return;
             }
-            return;
-        }
-        if let KeyCode::Char('n') | KeyCode::Char('N') = key {
-            if let Some(tx) = app.pending_permission_request.take() {
-                let _ = tx.send(false);
-                app.tui.add_message(ChatMessage::system("Permission denied."));
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                if let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
+                    let _ = tx.send(false);
+                    app.tui.add_message(ChatMessage::system(format!("Denied: {}", name)));
+                    app.tui.clear_status();
+
+                    if app.pending_permission_requests.is_empty() {
+                        app.tui.is_thinking = true;
+                    } else if let Some((next_name, _, next_reason, _)) = app.pending_permission_requests.front() {
+                        app.tui.add_message(ChatMessage::system(format!(
+                            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
+                            next_name, next_reason
+                        )));
+                        app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", next_name), false);
+                    }
+                }
+                return;
             }
-            return;
+            KeyCode::Esc => {
+                // Deny ALL remaining and resume
+                while let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
+                    let _ = tx.send(false);
+                    app.tui.add_message(ChatMessage::system(format!("Denied: {}", name)));
+                }
+                app.tui.clear_status();
+                app.tui.is_thinking = true;
+                return;
+            }
+            _ => {
+                // Swallow ALL other keys during permission gate
+                return;
+            }
         }
     }
 
-    // Intercept Y/N if waiting for budget confirmation
+    // ── BUDGET GATE ──────────────────────────────────────────────────────
     if app.pending_budget_request.is_some() {
-        if let KeyCode::Char('y') | KeyCode::Char('Y') = key {
-            if let Some(tx) = app.pending_budget_request.take() {
-                let _ = tx.send(true);
-                app.tui.add_message(ChatMessage::system("Budget override: continuing."));
-                app.tui.is_thinking = true;
+        match key {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(tx) = app.pending_budget_request.take() {
+                    let _ = tx.send(true);
+                    app.tui.add_message(ChatMessage::system("Budget override: continuing."));
+                    app.tui.is_thinking = true;
+                }
+                return;
             }
-            return;
-        }
-        if let KeyCode::Char('n') | KeyCode::Char('N') = key {
-            if let Some(tx) = app.pending_budget_request.take() {
-                let _ = tx.send(false);
-                app.tui.add_message(ChatMessage::system("Stopped. Budget cap enforced."));
-                app.event_rx = None;
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                if let Some(tx) = app.pending_budget_request.take() {
+                    let _ = tx.send(false);
+                    app.tui.add_message(ChatMessage::system("Stopped. Budget cap enforced."));
+                    app.event_rx = None;
+                }
+                return;
             }
-            return;
+            _ => { return; }
         }
     }
 
