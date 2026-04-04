@@ -157,3 +157,30 @@ pub fn auto_compact(messages: &mut Vec<Message>, keep_recent: usize) {
 
     messages.extend(recent);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Snip Compact: Truncate large tool outputs in history
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Replace extremely long tool outputs with a snipped marker to save tokens,
+/// while keeping the record that the tool was called.
+pub fn snip_compact(messages: &mut Vec<Message>) {
+    let msg_count = messages.len();
+    // Don't snip the very last few messages
+    let save_recent = 5;
+    if msg_count <= save_recent {
+        return;
+    }
+
+    for i in 1..(msg_count - save_recent) {
+        let msg = &mut messages[i];
+        if msg.role == "tool" && msg.content.len() > 2000 {
+            msg.content = format!(
+                "[SNIPPED_OUTPUT: original length {} chars]\n{}...",
+                msg.content.len(),
+                &msg.content[..500]
+            );
+        }
+    }
+}
+

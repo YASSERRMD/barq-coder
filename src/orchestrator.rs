@@ -178,6 +178,10 @@ impl Orchestrator {
         // Update token estimate
         self.total_tokens = crate::context::total_tokens(&self.conversation);
 
+        // Snip large tool outputs first
+        crate::context::snip_compact(&mut self.conversation);
+        self.total_tokens = crate::context::total_tokens(&self.conversation);
+
         // Auto-compact if exceeding budget threshold
         if self.budget.needs_compact(&self.conversation) {
             auto_compact(&mut self.conversation, 10); // Keep last 10 messages
