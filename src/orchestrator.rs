@@ -281,82 +281,88 @@ impl Orchestrator {
                 });
 
                 // Execute each tool call and append results
+                let mut handles = tokio::task::JoinSet::new();
+
                 for tc in &pending_tool_calls {
-                    let tool_name = &tc.function.name;
-                    let tool_args = &tc.function.arguments;
+                    let tool_name = tc.function.name.clone();
+                    let tool_args = tc.function.arguments.clone();
+                    
+                    let tools_arc = Arc::clone(&tools);
+                    let perms_arc = Arc::clone(&permissions);
+                    let tx_arc = tx.clone();
+                    
+                    handles.spawn(async move {
+                        let result = if let Some(tool) = tools_arc.get(&tool_name) {
+                            let path = tool.get_path(&tool_args);
+                            let mut perm_res = if let Some(p) = path {
+                                perms_arc.check_path(&p)
+                            } else {
+                                crate::tools::PermissionResult::Allow
+                            };
 
-                    let result = if let Some(tool) = tools.get(tool_name) {
-                        let path = tool.get_path(tool_args);
-                        let mut perm_res = if let Some(p) = path {
-                            permissions.check_path(&p)
-                        } else {
-                            crate::tools::PermissionResult::Allow
-                        };
-
-                        let tool_specific = tool.check_permissions(tool_args);
-                        if !matches!(perm_res, crate::tools::PermissionResult::Deny(_)) {
-                            perm_res = permissions.check_tool_call(tool_name, tool.risk(), tool_specific, tool_args);
-                        }
-
-                        if let crate::tools::PermissionResult::Deny(r) = perm_res {
-                            serde_json::json!({"error": format!("Permission denied: {}", r)})
-                        } else {
-                            let mut allowed = true;
-                            if let crate::tools::PermissionResult::Ask(reason) = perm_res {
-                                let (reply_tx, reply_rx) = oneshot::channel();
-                                let _ = tx.send(OrchestratorEvent::PermissionRequested {
-                                    name: tool_name.clone(),
-                                    args: tool_args.clone(),
-                                    reason,
-                                    tx: reply_tx,
-                                }).await;
-                                allowed = reply_rx.await.unwrap_or(false);
+                            let tool_specific = tool.check_permissions(&tool_args);
+                            if !matches!(perm_res, crate::tools::PermissionResult::Deny(_)) {
+                                perm_res = perms_arc.check_tool_call(&tool_name, tool.risk(), tool_specific, &tool_args);
                             }
 
-                            if allowed {
-                                match tool.call(tool_args.clone()).await {
-                                    Ok(result) => {
-                                        let _ = tx
-                                            .send(OrchestratorEvent::ToolResult {
+                            if let crate::tools::PermissionResult::Deny(r) = perm_res {
+                                serde_json::json!({"error": format!("Permission denied: {}", r)})
+                            } else {
+                                let mut allowed = true;
+                                if let crate::tools::PermissionResult::Ask(reason) = perm_res {
+                                    let (reply_tx, reply_rx) = oneshot::channel();
+                                    let _ = tx_arc.send(OrchestratorEvent::PermissionRequested {
+                                        name: tool_name.clone(),
+                                        args: tool_args.clone(),
+                                        reason,
+                                        tx: reply_tx,
+                                    }).await;
+                                    allowed = reply_rx.await.unwrap_or(false);
+                                }
+
+                                if allowed {
+                                    match tool.call(tool_args.clone()).await {
+                                        Ok(res) => {
+                                            let _ = tx_arc.send(OrchestratorEvent::ToolResult {
                                                 name: tool_name.clone(),
-                                                result: result.clone(),
-                                            })
-                                            .await;
-                                        result
-                                    }
-                                    Err(e) => {
-                                        let err_val = serde_json::json!({"error": e.to_string()});
-                                        let _ = tx
-                                            .send(OrchestratorEvent::ToolResult {
+                                                result: res.clone(),
+                                            }).await;
+                                            res
+                                        }
+                                        Err(e) => {
+                                            let err_val = serde_json::json!({"error": e.to_string()});
+                                            let _ = tx_arc.send(OrchestratorEvent::ToolResult {
                                                 name: tool_name.clone(),
                                                 result: err_val.clone(),
-                                            })
-                                            .await;
-                                        err_val
+                                            }).await;
+                                            err_val
+                                        }
                                     }
+                                } else {
+                                    serde_json::json!({"error": "User denied permission."})
                                 }
-                            } else {
-                                serde_json::json!({"error": "User denied permission."})
                             }
-                        }
-                    } else {
-                        let err_val =
-                            serde_json::json!({"error": format!("Unknown tool: {}", tool_name)});
-                        let _ = tx
-                            .send(OrchestratorEvent::ToolResult {
+                        } else {
+                            let err_val = serde_json::json!({"error": format!("Unknown tool: {}", tool_name)});
+                            let _ = tx_arc.send(OrchestratorEvent::ToolResult {
                                 name: tool_name.clone(),
                                 result: err_val.clone(),
-                            })
-                            .await;
-                        err_val
-                    };
-
-                    // Append tool result as a "tool" role message
-                    current_messages.push(rusty_ollama::ChatMessage {
-                        role: "tool".to_string(),
-                        content: serde_json::to_string(&result).unwrap_or_default(),
-                        tool_calls: None,
+                            }).await;
+                            err_val
+                        };
+                        
+                        (tool_name, result)
                     });
+                }
+
+                while let Some(res) = handles.join_next().await {
+                    if let Ok((_name, result)) = res {
+                        current_messages.push(rusty_ollama::ChatMessage {
+                            role: "tool".to_string(),
+                            content: serde_json::to_string(&result).unwrap_or_default(),
+                            tool_calls: None,
+                        });
+                    }
                 }
 
                 // Loop back to call the LLM with the tool results
