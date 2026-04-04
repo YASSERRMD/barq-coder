@@ -75,11 +75,16 @@ impl Orchestrator {
 
     /// Build the system prompt with BARQ context injected.
     fn build_system_prompt(&self, user_input: &str) -> String {
-        // Step 1: query BARQDB for relevant context
         let barq_results = self.barq.query(user_input, 10);
         let mut context_str = String::new();
+        let barq_budget = 4000; // Hard limit 4k chars for contextual data
         for r in barq_results {
-            context_str.push_str(&format!("{}:\n{}\n", r.file_path, r.content));
+            let chunk = format!("{}:\n{}\n", r.file_path, r.content);
+            if context_str.len() + chunk.len() > barq_budget {
+                context_str.push_str("\n[BARQ Context truncated due to budget]\n");
+                break;
+            }
+            context_str.push_str(&chunk);
         }
 
         // Step 2: query GraphDB for dependency context
@@ -176,6 +181,10 @@ impl Orchestrator {
         });
 
         // Update token estimate
+        self.total_tokens = crate::context::total_tokens(&self.conversation);
+
+        // Snip large tool outputs first
+        crate::context::snip_compact(&mut self.conversation);
         self.total_tokens = crate::context::total_tokens(&self.conversation);
 
         // Auto-compact if exceeding budget threshold
