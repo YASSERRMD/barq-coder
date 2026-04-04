@@ -68,6 +68,140 @@ struct App {
     skip_permissions: bool,
 }
 
+fn collect_workspace_files(workspace_root: &str) -> Vec<String> {
+    walkdir::WalkDir::new(workspace_root)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let p = e.path().to_string_lossy();
+            !p.contains("target/")
+                && !p.contains(".git/")
+                && e.path().extension().map_or(false, |ext| {
+                    matches!(
+                        ext.to_string_lossy().as_ref(),
+                        "rs" | "toml" | "md" | "yaml" | "yml" | "json"
+                    )
+                })
+        })
+        .take(80)
+        .map(|e| {
+            e.path()
+                .strip_prefix(workspace_root)
+                .unwrap_or(e.path())
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect()
+}
+
+fn collect_saved_sessions(session_store: &SessionStore) -> Vec<SessionEntry> {
+    session_store
+        .list()
+        .into_iter()
+        .map(|m| SessionEntry {
+            id: m.id,
+            created_at: m.created_at,
+            event_count: m.event_count,
+            workspace: m.workspace,
+        })
+        .collect()
+}
+
+fn refresh_tui_metadata(app: &mut App) {
+    let file_selection = app.tui.file_list_state.selected().unwrap_or(0);
+    let session_selection = app.tui.session_list_state.selected().unwrap_or(0);
+
+    app.tui.workspace_files = collect_workspace_files(&app.config.workspace_root);
+    app.tui.sessions = collect_saved_sessions(&app.session_store);
+
+    if app.tui.workspace_files.is_empty() {
+        app.tui.file_list_state.select(None);
+    } else {
+        app.tui.file_list_state.select(Some(file_selection.min(app.tui.workspace_files.len() - 1)));
+    }
+
+    if app.tui.sessions.is_empty() {
+        app.tui.session_list_state.select(None);
+    } else {
+        app.tui.session_list_state.select(Some(session_selection.min(app.tui.sessions.len() - 1)));
+    }
+}
+
+fn summarize_tool_result(name: &str, result: &serde_json::Value) -> String {
+    if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
+        return format!("{} failed: {}", name, error);
+    }
+
+    match name {
+        "edit_file" => {
+            let path = result
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+
+            if result.get("preview").and_then(|v| v.as_bool()).unwrap_or(false) {
+                format!("Preview edit for {}", path)
+            } else if result.get("applied").and_then(|v| v.as_bool()).unwrap_or(false) {
+                format!("Updated {}", path)
+            } else {
+                format!("Processed edit request for {}", path)
+            }
+        }
+        "create_file" => {
+            let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            if result.get("created").and_then(|v| v.as_bool()).unwrap_or(false) {
+                format!("Created {}", path)
+            } else {
+                format!("Processed create request for {}", path)
+            }
+        }
+        "shell_exec" => {
+            let exit_code = result.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let timed_out = result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false);
+            if timed_out {
+                format!("shell_exec timed out (exit {})", exit_code)
+            } else {
+                format!("shell_exec completed with exit {}", exit_code)
+            }
+        }
+        _ => serde_json::to_string(result)
+            .map(|raw| {
+                let compact = raw.replace('\n', " ");
+                if compact.len() > 120 {
+                    format!("{}: {}...", name, &compact[..120])
+                } else {
+                    format!("{}: {}", name, compact)
+                }
+            })
+            .unwrap_or_else(|_| format!("{} completed", name)),
+    }
+}
+
+fn extract_edit_patch(name: &str, result: &serde_json::Value) -> Option<(String, String)> {
+    let patch = result.get("diff").and_then(|v| v.as_str())?;
+
+    match name {
+        "edit_file" => {
+            let applied = result.get("applied").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !applied {
+                return None;
+            }
+            let path = result.get("file_path").and_then(|v| v.as_str())?;
+            Some((path.to_string(), patch.to_string()))
+        }
+        "create_file" => {
+            let created = result.get("created").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !created {
+                return None;
+            }
+            let path = result.get("path").and_then(|v| v.as_str())?;
+            Some((path.to_string(), patch.to_string()))
+        }
+        _ => None,
+    }
+}
+
 impl App {
     fn new(resume_id: Option<String>, cli: &Cli) -> Self {
         let mut config = Config::load();
@@ -120,42 +254,8 @@ impl App {
             .as_secs();
 
         // Load workspace files for sidebar
-        let workspace_files = walkdir::WalkDir::new(&config.workspace_root)
-            .max_depth(3)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let p = e.path().to_string_lossy();
-                !p.contains("target/")
-                    && !p.contains(".git/")
-                    && e.path().extension().map_or(false, |ext| {
-                        matches!(
-                            ext.to_string_lossy().as_ref(),
-                            "rs" | "toml" | "md" | "yaml" | "yml" | "json"
-                        )
-                    })
-            })
-            .take(80)
-            .map(|e| {
-                e.path()
-                    .strip_prefix(&config.workspace_root)
-                    .unwrap_or(e.path())
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
-
-        // Load saved sessions for the Sessions tab
-        let saved_sessions = session_store
-            .list()
-            .into_iter()
-            .map(|m| SessionEntry {
-                id: m.id,
-                created_at: m.created_at,
-                event_count: m.event_count,
-                workspace: m.workspace,
-            })
-            .collect::<Vec<_>>();
+        let workspace_files = collect_workspace_files(&config.workspace_root);
+        let saved_sessions = collect_saved_sessions(&session_store);
 
         let token_limit = config.token_limit;
         let model = config.ollama_model.clone();
@@ -187,7 +287,7 @@ impl App {
                     self.tui.add_message(ChatMessage::user(&content));
                 }
                 SessionEvent::AssistantMessage { content, .. } => {
-                    self.tui.add_message(ChatMessage::agent(&content));
+                    self.tui.append_agent_token(&content);
                 }
                 SessionEvent::ToolCall { name, args, .. } => {
                     self.tui.add_message(ChatMessage::tool_call(format!(
@@ -195,8 +295,13 @@ impl App {
                         name, args
                     )));
                 }
+                SessionEvent::ToolResult { name, result, .. } => {
+                    let entry = summarize_tool_result(&name, &result);
+                    self.tui.tool_log.push(entry.clone());
+                    self.tui.add_message(ChatMessage::tool_result(entry));
+                }
                 SessionEvent::EditApplied { file, patch, .. } => {
-                    // Just show as system message for historical load
+                    self.tui.update_diff(format!("Latest Diff • {}", file), &patch);
                     self.tui.add_message(ChatMessage::system(format!(
                         "Edit applied to {}",
                         file
@@ -399,6 +504,7 @@ async fn run_app<B: ratatui::backend::Backend>(
 
     loop {
         terminal.draw(|f| tui::draw(f, &mut app.tui))?;
+        let mut refresh_metadata = false;
 
         // ── Orchestrator event drain ──────────────────────────────────────────
         if let Some(rx) = &mut app.event_rx {
@@ -407,7 +513,6 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::Token(t) => {
                         app.tui.is_thinking = true;
                         app.tui.append_agent_token(&t);
-                        let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&t));
                     }
                     OrchestratorEvent::ToolCall { name, args } => {
                         app.tui.current_tool = Some(name.clone());
@@ -418,9 +523,16 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     OrchestratorEvent::ToolResult { name, result } => {
                         app.tui.current_tool = None;
-                        let entry = format!("Result for {}: {}", name, result);
+                        let entry = summarize_tool_result(&name, &result);
                         app.tui.tool_log.push(entry.clone());
                         app.tui.add_message(ChatMessage::tool_result(&entry));
+                        let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_result(&name, result.clone()));
+
+                        if let Some((file, patch)) = extract_edit_patch(&name, &result) {
+                            app.tui.update_diff(format!("Latest Diff • {}", file), &patch);
+                            let _ = app.session_store.append(&app.session_id, &SessionEvent::edit_applied(&file, &patch));
+                            refresh_metadata = true;
+                        }
                     }
                     OrchestratorEvent::PermissionRequested { name, args, reason, tx } => {
                         app.tui.current_tool = None;
@@ -465,10 +577,19 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::Done(answer) => {
                         app.tui.is_thinking = false;
                         app.tui.current_tool = None;
-                        app.tui.add_message(ChatMessage::agent(&answer));
+                        let has_streamed_answer = matches!(
+                            app.tui.messages.last(),
+                            Some(last)
+                                if matches!(last.kind, tui::MessageKind::Agent)
+                                    && last.content == answer
+                        );
+                        if !has_streamed_answer {
+                            app.tui.add_message(ChatMessage::agent(&answer));
+                        }
                         app.tui.set_status("Done", false);
                         app.event_rx = None;
                         let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&answer));
+                        refresh_metadata = true;
                         break;
                     }
                     OrchestratorEvent::Error(err) => {
@@ -477,10 +598,16 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.tui.add_message(ChatMessage::error(&err));
                         app.tui.set_status(format!("Error: {}", err), true);
                         app.event_rx = None;
+                        let _ = app.session_store.append(&app.session_id, &SessionEvent::error(&err));
+                        refresh_metadata = true;
                         break;
                     }
                 }
             }
+        }
+
+        if refresh_metadata {
+            refresh_tui_metadata(app);
         }
 
         // ── Input events ──────────────────────────────────────────────────────
@@ -774,8 +901,13 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                                     name, args
                                 )));
                             }
+                            SessionEvent::ToolResult { name, result, .. } => {
+                                let entry = summarize_tool_result(&name, &result);
+                                app.tui.tool_log.push(entry.clone());
+                                app.tui.add_message(ChatMessage::tool_result(entry));
+                            }
                             SessionEvent::EditApplied { file, patch, .. } => {
-                                app.tui.set_diff(&patch);
+                                app.tui.update_diff(format!("Latest Diff • {}", file), &patch);
                                 app.tui.add_message(ChatMessage::system(format!(
                                     "Edit applied to {}",
                                     file
@@ -856,6 +988,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
 fn submit_input(app: &mut App, input: &str) {
     app.tui.add_message(ChatMessage::user(input));
     let _ = app.session_store.append(&app.session_id, &SessionEvent::user(input));
+    refresh_tui_metadata(app);
 
     if input.starts_with("/index") {
         let parts: Vec<&str> = input.split_whitespace().collect();
@@ -912,8 +1045,13 @@ fn submit_input(app: &mut App, input: &str) {
         });
         app.event_rx = Some(rx);
     } else if input == "/diff" {
-        // Show last diff in Diff tab (placeholder)
-        app.tui.set_diff("--- a/example.rs\n+++ b/example.rs\n@@ -1,4 +1,4 @@\n fn main() {\n-    println!(\"hello\");\n+    println!(\"Hello, BarqCoder!\");\n }\n");
+        if app.tui.diff_content.is_empty() {
+            app.tui.add_message(ChatMessage::system(
+                "No diff captured yet. Run a file mutation first."
+            ));
+        } else {
+            app.tui.open_diff();
+        }
     } else if input == "/sessions" {
         app.tui.active_tab = ActiveTab::Sessions;
     } else if let Some(slash_cmd) = commands::parse(input) {

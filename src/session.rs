@@ -98,6 +98,14 @@ impl SessionEvent {
         }
     }
 
+    pub fn edit_applied(file: &str, patch: &str) -> Self {
+        Self::EditApplied {
+            file: file.to_string(),
+            patch: patch.to_string(),
+            timestamp: Self::now(),
+        }
+    }
+
     pub fn verification(
         step_id: &str,
         check_pass: bool,
