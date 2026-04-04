@@ -62,10 +62,16 @@ struct App {
     event_rx: Option<mpsc::Receiver<OrchestratorEvent>>,
     session_store: SessionStore,
     session_id: String,
-    pending_permission_requests: std::collections::VecDeque<(String, serde_json::Value, String, tokio::sync::oneshot::Sender<bool>)>,
+    pending_permission_requests: std::collections::VecDeque<PendingPermissionRequest>,
     pending_budget_request: Option<tokio::sync::oneshot::Sender<bool>>,
     cost: CostTracker,
     skip_permissions: bool,
+}
+
+struct PendingPermissionRequest {
+    name: String,
+    reason: String,
+    tx: tokio::sync::oneshot::Sender<bool>,
 }
 
 fn collect_workspace_files(workspace_root: &str) -> Vec<String> {
@@ -323,6 +329,164 @@ fn extract_edit_patch(name: &str, result: &serde_json::Value) -> Option<(String,
         }
         _ => None,
     }
+}
+
+fn build_permission_preview(path: &str, old: Option<&str>, new: Option<&str>) -> String {
+    let mut lines = vec![
+        format!("--- a/{}", path),
+        format!("+++ b/{}", path),
+        "@@ pending @@".to_string(),
+    ];
+
+    if let Some(old) = old {
+        for line in old.lines() {
+            lines.push(format!("-{}", line));
+        }
+    }
+
+    if let Some(new) = new {
+        for line in new.lines() {
+            lines.push(format!("+{}", line));
+        }
+    }
+
+    if lines.len() == 3 {
+        lines.push("Preview unavailable".to_string());
+    }
+
+    lines.join("\n")
+}
+
+fn build_pending_action(name: &str, args: &serde_json::Value, reason: &str) -> tui::PendingAction {
+    match name {
+        "edit_file" => {
+            let path = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let patch = args
+                .get("patch")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    build_permission_preview(
+                        &path,
+                        args.get("old_string").and_then(|v| v.as_str()),
+                        args.get("new_string").and_then(|v| v.as_str()),
+                    )
+                });
+            let full_content = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            tui::PendingAction::write_file(path, patch, full_content, name)
+        }
+        "create_file" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let patch = build_permission_preview(&path, None, Some(&content));
+            tui::PendingAction::write_file(path, patch, content, name)
+        }
+        "shell_exec" => {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            tui::PendingAction::shell_cmd(command, reason, name)
+        }
+        "git_ops" => {
+            let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("status");
+            let git_args = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
+            let command = if git_args.is_empty() {
+                format!("git {}", op)
+            } else {
+                format!("git {} {}", op, git_args)
+            };
+            tui::PendingAction::shell_cmd(command, reason, name)
+        }
+        _ => tui::PendingAction::shell_cmd(name, reason, name),
+    }
+}
+
+fn show_permission_prompt(app: &mut App) {
+    if let Some(next) = app.pending_permission_requests.front() {
+        app.tui.add_message(ChatMessage::system(format!(
+            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nReview in Sandbox and press [Y] / [N], or [Esc] to deny all.",
+            next.name, next.reason
+        )));
+        app.tui.set_status(
+            format!("Pending approval: '{}' [{} queued]", next.name, app.pending_permission_requests.len()),
+            false,
+        );
+    }
+}
+
+fn queue_permission_request(
+    app: &mut App,
+    name: String,
+    args: serde_json::Value,
+    reason: String,
+    tx: tokio::sync::oneshot::Sender<bool>,
+) {
+    let action = build_pending_action(&name, &args, &reason);
+    app.pending_permission_requests.push_back(PendingPermissionRequest {
+        name,
+        reason,
+        tx,
+    });
+    app.tui.action_queue.push(action);
+    if app.tui.action_queue.len() == 1 {
+        app.tui.action_queue_selected = 0;
+    } else {
+        app.tui.action_queue_selected = app.tui.action_queue_selected.min(app.tui.action_queue.len() - 1);
+    }
+    app.tui.action_preview_scroll = 0;
+    app.tui.active_tab = ActiveTab::ActionQueue;
+    show_permission_prompt(app);
+}
+
+fn resolve_permission_request(app: &mut App, index: usize, approved: bool) {
+    if index >= app.pending_permission_requests.len() || index >= app.tui.action_queue.len() {
+        return;
+    }
+
+    if let Some(request) = app.pending_permission_requests.remove(index) {
+        let _ = request.tx.send(approved);
+        let outcome = if approved { "Approved" } else { "Denied" };
+        app.tui.add_message(ChatMessage::system(format!("{}: {}", outcome, request.name)));
+    }
+
+    app.tui.action_queue.remove(index);
+    if app.tui.action_queue.is_empty() {
+        app.tui.action_queue_selected = 0;
+    } else {
+        app.tui.action_queue_selected = app.tui.action_queue_selected.min(app.tui.action_queue.len() - 1);
+    }
+    app.tui.action_preview_scroll = 0;
+
+    if app.pending_permission_requests.is_empty() {
+        app.tui.clear_status();
+        app.tui.is_thinking = true;
+    } else {
+        show_permission_prompt(app);
+    }
+}
+
+fn deny_all_permission_requests(app: &mut App) {
+    while !app.pending_permission_requests.is_empty() && !app.tui.action_queue.is_empty() {
+        resolve_permission_request(app, 0, false);
+    }
+    app.tui.is_thinking = true;
 }
 
 impl App {
@@ -630,6 +794,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     loop {
         terminal.draw(|f| tui::draw(f, &mut app.tui))?;
         let mut refresh_metadata = false;
+        let mut queued_permissions = Vec::new();
 
         // ── Orchestrator event drain ──────────────────────────────────────────
         if let Some(rx) = &mut app.event_rx {
@@ -672,16 +837,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         } else {
                             // Pause thinking so user knows we need input
                             app.tui.is_thinking = false;
-                            app.pending_permission_requests.push_back((name.clone(), args.clone(), reason.clone(), tx));
-
-                            // Show prompt for the first queued request
-                            if app.pending_permission_requests.len() == 1 {
-                                app.tui.add_message(ChatMessage::system(format!(
-                                    ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
-                                    name, reason
-                                )));
-                                app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", name), false);
-                            }
+                            queued_permissions.push((name, args, reason, tx));
                         }
                     }
                     OrchestratorEvent::BudgetWarning { used_usd, cap_usd, pct } => {
@@ -738,6 +894,10 @@ async fn run_app<B: ratatui::backend::Backend>(
             refresh_tui_metadata(app);
         }
 
+        for (name, args, reason, tx) in queued_permissions.drain(..) {
+            queue_permission_request(app, name, args, reason, tx);
+        }
+
         // ── Input events ──────────────────────────────────────────────────────
         if event::poll(tick_rate)? {
             match event::read()? {
@@ -773,58 +933,44 @@ async fn run_app<B: ratatui::backend::Backend>(
 fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     // ── PERMISSION GATE ─────────────────────────────────────────────────
     // When there are pending permission requests, ALL key input is
-    // captured here. Only Y, N, and Esc are accepted. Every other key
-    // is swallowed so that the user MUST respond before continuing.
+    // captured here. Y/N resolve the selected sandbox action, Esc denies
+    // everything, and ActionQueue navigation keys stay enabled.
     if !app.pending_permission_requests.is_empty() {
         match key {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
-                    let _ = tx.send(true);
-                    app.tui.add_message(ChatMessage::system(format!("Approved: {}", name)));
-                    app.tui.clear_status();
-
-                    if app.pending_permission_requests.is_empty() {
-                        app.tui.is_thinking = true;
-                    } else if let Some((next_name, _, next_reason, _)) = app.pending_permission_requests.front() {
-                        app.tui.add_message(ChatMessage::system(format!(
-                            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
-                            next_name, next_reason
-                        )));
-                        app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", next_name), false);
-                    }
-                }
+                let selected = if app.tui.active_tab == ActiveTab::ActionQueue {
+                    app.tui.action_queue_selected.min(app.pending_permission_requests.len().saturating_sub(1))
+                } else {
+                    0
+                };
+                resolve_permission_request(app, selected, true);
                 return;
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                if let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
-                    let _ = tx.send(false);
-                    app.tui.add_message(ChatMessage::system(format!("Denied: {}", name)));
-                    app.tui.clear_status();
-
-                    if app.pending_permission_requests.is_empty() {
-                        app.tui.is_thinking = true;
-                    } else if let Some((next_name, _, next_reason, _)) = app.pending_permission_requests.front() {
-                        app.tui.add_message(ChatMessage::system(format!(
-                            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
-                            next_name, next_reason
-                        )));
-                        app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", next_name), false);
-                    }
-                }
+                let selected = if app.tui.active_tab == ActiveTab::ActionQueue {
+                    app.tui.action_queue_selected.min(app.pending_permission_requests.len().saturating_sub(1))
+                } else {
+                    0
+                };
+                resolve_permission_request(app, selected, false);
                 return;
             }
             KeyCode::Esc => {
-                // Deny ALL remaining and resume
-                while let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
-                    let _ = tx.send(false);
-                    app.tui.add_message(ChatMessage::system(format!("Denied: {}", name)));
-                }
-                app.tui.clear_status();
-                app.tui.is_thinking = true;
+                deny_all_permission_requests(app);
+                return;
+            }
+            KeyCode::Tab => {
+                app.tui.active_tab = app.tui.active_tab.next();
+                return;
+            }
+            KeyCode::BackTab => {
+                app.tui.active_tab = app.tui.active_tab.prev();
                 return;
             }
             _ => {
-                // Swallow ALL other keys during permission gate
+                if app.tui.active_tab == ActiveTab::ActionQueue {
+                    handle_action_queue_keys(app, key);
+                }
                 return;
             }
         }
@@ -1157,15 +1303,12 @@ fn handle_action_queue_keys(app: &mut App, key: KeyCode) {
             app.tui.action_preview_scroll += 20;
         }
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            if let Some(action) = app.tui.action_queue.get_mut(app.tui.action_queue_selected) {
-                action.approved = Some(true);
-                // Implementation of user approval application will happen asynchronously in a background task monitoring the queue.
-            }
+            let selected = app.tui.action_queue_selected.min(app.pending_permission_requests.len().saturating_sub(1));
+            resolve_permission_request(app, selected, true);
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
-            if let Some(action) = app.tui.action_queue.get_mut(app.tui.action_queue_selected) {
-                action.approved = Some(false);
-            }
+            let selected = app.tui.action_queue_selected.min(app.pending_permission_requests.len().saturating_sub(1));
+            resolve_permission_request(app, selected, false);
         }
         _ => {}
     }
@@ -1371,6 +1514,40 @@ async fn start_health_server() {
                     let _ = stream.write_all(response.as_bytes()).await;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_pending_action, build_permission_preview};
+    use crate::tui::ActionKind;
+    use serde_json::json;
+
+    #[test]
+    fn permission_preview_formats_multiline_edits() {
+        let preview = build_permission_preview("src/main.rs", Some("old\nline"), Some("new\nline"));
+
+        assert!(preview.contains("--- a/src/main.rs"));
+        assert!(preview.contains("+++ b/src/main.rs"));
+        assert!(preview.contains("-old"));
+        assert!(preview.contains("+new"));
+    }
+
+    #[test]
+    fn shell_exec_permissions_map_to_shell_actions() {
+        let action = build_pending_action(
+            "shell_exec",
+            &json!({ "command": "cargo check" }),
+            "Run verification",
+        );
+
+        match action.kind {
+            ActionKind::ShellCommand { command, reason } => {
+                assert_eq!(command, "cargo check");
+                assert_eq!(reason, "Run verification");
+            }
+            other => panic!("unexpected action kind: {:?}", other),
         }
     }
 }
