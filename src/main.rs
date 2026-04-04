@@ -81,6 +81,11 @@ enum PermissionDecision {
     Deny,
 }
 
+const TOOL_CALL_SUMMARY_MAX_LINES: usize = 8;
+const TOOL_CALL_SUMMARY_MAX_CHARS: usize = 480;
+const PERMISSION_PREVIEW_MAX_LINES: usize = 80;
+const PERMISSION_PREVIEW_MAX_CHARS: usize = 4_000;
+
 fn collect_workspace_files(workspace_root: &str) -> Vec<String> {
     walkdir::WalkDir::new(workspace_root)
         .max_depth(3)
@@ -361,7 +366,143 @@ fn build_permission_preview(path: &str, old: Option<&str>, new: Option<&str>) ->
         lines.push("Preview unavailable".to_string());
     }
 
-    lines.join("\n")
+    truncate_multiline(
+        &lines.join("\n"),
+        PERMISSION_PREVIEW_MAX_LINES,
+        PERMISSION_PREVIEW_MAX_CHARS,
+    )
+}
+
+fn truncate_inline(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+
+    let mut shortened = String::new();
+    for ch in trimmed.chars().take(max_chars.saturating_sub(1)) {
+        shortened.push(ch);
+    }
+    shortened.push('…');
+    shortened
+}
+
+fn truncate_multiline(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut kept = Vec::new();
+    let mut used_chars = 0usize;
+    let mut truncated = false;
+    let all_lines: Vec<&str> = text.lines().collect();
+    let total_lines = all_lines.len();
+    let total_chars = text.chars().count();
+
+    for line in &all_lines {
+        let line_len = line.chars().count();
+        let next_chars = used_chars + line_len + usize::from(!kept.is_empty());
+        if kept.len() >= max_lines || next_chars > max_chars {
+            truncated = true;
+            break;
+        }
+        kept.push((*line).to_string());
+        used_chars = next_chars;
+    }
+
+    if kept.is_empty() && !text.is_empty() {
+        return truncate_inline(text, max_chars.max(1));
+    }
+
+    if truncated || total_lines > kept.len() || total_chars > used_chars {
+        kept.push(format!(
+            "… truncated {} more lines ({} chars total)",
+            total_lines.saturating_sub(kept.len()),
+            total_chars
+        ));
+    }
+
+    kept.join("\n")
+}
+
+fn content_stats(label: &str, text: Option<&str>) -> Option<String> {
+    let text = text?;
+    Some(format!(
+        "{}: {} lines / {} chars",
+        label,
+        text.lines().count().max(1),
+        text.chars().count()
+    ))
+}
+
+fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
+    match name {
+        "edit_file" => {
+            let path = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            let mut details = Vec::new();
+            if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
+                details.push(format!(
+                    "patch: {} lines / {} chars",
+                    patch.lines().count().max(1),
+                    patch.chars().count()
+                ));
+            } else {
+                if let Some(old) = content_stats("old", args.get("old_string").and_then(|v| v.as_str())) {
+                    details.push(old);
+                }
+                if let Some(new) = content_stats("new", args.get("new_string").and_then(|v| v.as_str())) {
+                    details.push(new);
+                }
+            }
+
+            if details.is_empty() {
+                format!("Calling edit_file on {}", path)
+            } else {
+                format!("Calling edit_file on {}\n{}", path, details.join("\n"))
+            }
+        }
+        "create_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            let content = args.get("content").and_then(|v| v.as_str());
+            let detail = content_stats("content", content).unwrap_or_else(|| "content: unavailable".to_string());
+            format!("Calling create_file for {}\n{}", path, detail)
+        }
+        "shell_exec" => {
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            let working_dir = args
+                .get("working_dir")
+                .and_then(|v| v.as_str())
+                .filter(|dir| !dir.is_empty() && *dir != ".")
+                .unwrap_or(".");
+            if working_dir == "." {
+                format!("Calling shell_exec: {}", truncate_inline(command, 140))
+            } else {
+                format!(
+                    "Calling shell_exec: {}\nworking_dir: {}",
+                    truncate_inline(command, 120),
+                    working_dir
+                )
+            }
+        }
+        "git_ops" => {
+            let operation = args.get("operation").and_then(|v| v.as_str()).unwrap_or("status");
+            let git_args = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
+            let command = if git_args.trim().is_empty() {
+                format!("git {}", operation)
+            } else {
+                format!("git {} {}", operation, git_args.trim())
+            };
+            format!("Calling git_ops: {}", truncate_inline(&command, 140))
+        }
+        _ => {
+            let pretty = serde_json::to_string_pretty(args)
+                .unwrap_or_else(|_| args.to_string());
+            format!(
+                "Calling {} with\n{}",
+                name,
+                truncate_multiline(&pretty, TOOL_CALL_SUMMARY_MAX_LINES, TOOL_CALL_SUMMARY_MAX_CHARS)
+            )
+        }
+    }
 }
 
 fn build_pending_action(name: &str, args: &serde_json::Value, reason: &str) -> tui::PendingAction {
@@ -375,7 +516,7 @@ fn build_pending_action(name: &str, args: &serde_json::Value, reason: &str) -> t
             let patch = args
                 .get("patch")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(|s| truncate_multiline(s, PERMISSION_PREVIEW_MAX_LINES, PERMISSION_PREVIEW_MAX_CHARS))
                 .unwrap_or_else(|| {
                     build_permission_preview(
                         &path,
@@ -383,12 +524,7 @@ fn build_pending_action(name: &str, args: &serde_json::Value, reason: &str) -> t
                         args.get("new_string").and_then(|v| v.as_str()),
                     )
                 });
-            let full_content = args
-                .get("new_string")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            tui::PendingAction::write_file(path, patch, full_content, name)
+            tui::PendingAction::write_file(path, patch, name)
         }
         "create_file" => {
             let path = args
@@ -402,7 +538,7 @@ fn build_pending_action(name: &str, args: &serde_json::Value, reason: &str) -> t
                 .unwrap_or("")
                 .to_string();
             let patch = build_permission_preview(&path, None, Some(&content));
-            tui::PendingAction::write_file(path, patch, content, name)
+            tui::PendingAction::write_file(path, patch, name)
         }
         "shell_exec" => {
             let command = args
@@ -684,10 +820,7 @@ impl App {
                     self.tui.append_agent_token(&content);
                 }
                 SessionEvent::ToolCall { name, args, .. } => {
-                    self.tui.add_message(ChatMessage::tool_call(format!(
-                        "{} ← {}",
-                        name, args
-                    )));
+                    self.tui.add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
                 }
                 SessionEvent::ToolResult { name, result, .. } => {
                     let entry = summarize_tool_result(&name, &result);
@@ -911,8 +1044,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     OrchestratorEvent::ToolCall { name, args } => {
                         app.tui.current_tool = Some(name.clone());
-                        let entry = format!("Calling {} with {}", name, args);
-                        app.tui.tool_log.push(entry.clone());
+                        let entry = summarize_tool_call(&name, &args);
+                        let log_entry = entry.lines().next().unwrap_or(&entry).to_string();
+                        app.tui.tool_log.push(log_entry);
                         app.tui.tool_scroll = usize::MAX;
                         app.tui.add_message(ChatMessage::tool_call(&entry));
                         let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_call(&name, args.clone()));
@@ -1365,10 +1499,7 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                                 app.tui.append_agent_token(&content);
                             }
                             SessionEvent::ToolCall { name, args, .. } => {
-                                app.tui.add_message(ChatMessage::tool_call(format!(
-                                    "{} ← {}",
-                                    name, args
-                                )));
+                                app.tui.add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
                             }
                             SessionEvent::ToolResult { name, result, .. } => {
                                 let entry = summarize_tool_result(&name, &result);
