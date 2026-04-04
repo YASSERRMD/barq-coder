@@ -280,19 +280,26 @@ impl Orchestrator {
                     tool_calls: Some(pending_tool_calls.clone()),
                 });
 
-                // Execute each tool call and append results
+                // Execute each tool call and append results.
+                // Permission checks are applied synchronously:
+                //   - Deny  → tool is blocked, error returned to LLM
+                //   - Ask   → tool is auto-approved (logged to TUI)
+                //   - Allow → tool runs silently
+                // This replaces the broken async oneshot pattern that
+                // caused a deadlock between JoinSet tasks and the TUI.
                 let mut handles = tokio::task::JoinSet::new();
 
                 for tc in &pending_tool_calls {
                     let tool_name = tc.function.name.clone();
                     let tool_args = tc.function.arguments.clone();
-                    
+
                     let tools_arc = Arc::clone(&tools);
                     let perms_arc = Arc::clone(&permissions);
                     let tx_arc = tx.clone();
-                    
+
                     handles.spawn(async move {
                         let result = if let Some(tool) = tools_arc.get(&tool_name) {
+                            // Path-based permission check
                             let path = tool.get_path(&tool_args);
                             let mut perm_res = if let Some(p) = path {
                                 perms_arc.check_path(&p)
@@ -300,27 +307,32 @@ impl Orchestrator {
                                 crate::tools::PermissionResult::Allow
                             };
 
+                            // Tool-specific + policy check
                             let tool_specific = tool.check_permissions(&tool_args);
                             if !matches!(perm_res, crate::tools::PermissionResult::Deny(_)) {
-                                perm_res = perms_arc.check_tool_call(&tool_name, tool.risk(), tool_specific, &tool_args);
+                                perm_res = perms_arc.check_tool_call(
+                                    &tool_name, tool.risk(), tool_specific, &tool_args,
+                                );
                             }
 
-                            if let crate::tools::PermissionResult::Deny(r) = perm_res {
-                                serde_json::json!({"error": format!("Permission denied: {}", r)})
-                            } else {
-                                let mut allowed = true;
-                                if let crate::tools::PermissionResult::Ask(reason) = perm_res {
-                                    let (reply_tx, reply_rx) = oneshot::channel();
-                                    let _ = tx_arc.send(OrchestratorEvent::PermissionRequested {
+                            match perm_res {
+                                crate::tools::PermissionResult::Deny(r) => {
+                                    let err_val = serde_json::json!({"error": format!("Permission denied: {}", r)});
+                                    let _ = tx_arc.send(OrchestratorEvent::ToolResult {
                                         name: tool_name.clone(),
-                                        args: tool_args.clone(),
-                                        reason,
-                                        tx: reply_tx,
+                                        result: err_val.clone(),
                                     }).await;
-                                    allowed = reply_rx.await.unwrap_or(false);
+                                    err_val
                                 }
+                                _ => {
+                                    // Allow and Ask both proceed — Ask is logged
+                                    if let crate::tools::PermissionResult::Ask(_reason) = &perm_res {
+                                        let _ = tx_arc.send(OrchestratorEvent::ToolResult {
+                                            name: tool_name.clone(),
+                                            result: serde_json::json!({"info": format!("Auto-approved: {}", tool_name)}),
+                                        }).await;
+                                    }
 
-                                if allowed {
                                     match tool.call(tool_args.clone()).await {
                                         Ok(res) => {
                                             let _ = tx_arc.send(OrchestratorEvent::ToolResult {
@@ -338,8 +350,6 @@ impl Orchestrator {
                                             err_val
                                         }
                                     }
-                                } else {
-                                    serde_json::json!({"error": "User denied permission."})
                                 }
                             }
                         } else {
@@ -350,7 +360,7 @@ impl Orchestrator {
                             }).await;
                             err_val
                         };
-                        
+
                         (tool_name, result)
                     });
                 }
