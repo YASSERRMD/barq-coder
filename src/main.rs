@@ -26,6 +26,7 @@ mod cost_tracker;
 mod lsp;
 mod macro_goals;
 mod memory;
+mod mcp;
 mod orchestrator;
 mod permissions;
 mod sandbox;
