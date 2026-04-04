@@ -570,6 +570,42 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
 }
 
 fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
+    // ── Autocomplete interception ──
+    // When the autocomplete popup is visible, Up/Down navigate it,
+    // Tab accepts the selection, and Enter accepts then submits.
+    if app.tui.is_autocomplete_active() {
+        match key {
+            KeyCode::Up => {
+                app.tui.autocomplete_up();
+                return;
+            }
+            KeyCode::Down => {
+                app.tui.autocomplete_down();
+                return;
+            }
+            KeyCode::Tab => {
+                app.tui.autocomplete_accept();
+                return;
+            }
+            KeyCode::Enter => {
+                app.tui.autocomplete_accept();
+                // Fall through to submit the accepted command
+                if let Some(input) = app.tui.commit_input() {
+                    submit_input(app, &input);
+                }
+                return;
+            }
+            KeyCode::Esc => {
+                // Dismiss autocomplete by clearing input
+                app.tui.input.clear();
+                app.tui.input_cursor = 0;
+                app.tui.autocomplete_idx = 0;
+                return;
+            }
+            _ => {} // Let other keys (Char, Backspace, etc.) fall through
+        }
+    }
+
     match key {
         // Submit
         KeyCode::Enter => {

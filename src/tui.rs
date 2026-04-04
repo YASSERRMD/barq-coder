@@ -212,6 +212,7 @@ pub struct TuiState {
     pub input_cursor: usize,
     pub input_history: Vec<String>,
     pub input_history_idx: usize,
+    pub autocomplete_idx: usize,
 
     // Sidebar / file tree
     pub workspace_files: Vec<String>,
@@ -265,6 +266,7 @@ impl TuiState {
             input_cursor: 0,
             input_history: Vec::new(),
             input_history_idx: 0,
+            autocomplete_idx: 0,
             workspace_files: Vec::new(),
             file_list_state: {
                 let mut s = ListState::default();
@@ -336,6 +338,7 @@ impl TuiState {
     pub fn input_insert(&mut self, c: char) {
         self.input.insert(self.input_cursor, c);
         self.input_cursor += c.len_utf8();
+        self.autocomplete_idx = 0;
     }
 
     pub fn input_delete_back(&mut self) {
@@ -350,6 +353,7 @@ impl TuiState {
             self.input.drain(c_start..self.input_cursor);
             self.input_cursor = c_start;
         }
+        self.autocomplete_idx = 0;
     }
 
     pub fn input_move_left(&mut self) {
@@ -416,7 +420,64 @@ impl TuiState {
         self.input_history_idx = self.input_history.len();
         self.input.clear();
         self.input_cursor = 0;
+        self.autocomplete_idx = 0;
         Some(trimmed)
+    }
+
+    // ── Autocomplete helpers ──
+
+    /// The canonical list of slash commands for autocomplete.
+    pub fn slash_commands() -> &'static [(&'static str, &'static str)] {
+        &[
+            ("/help",     "Show help message"),
+            ("/clear",    "Clear conversation"),
+            ("/config",   "Display current config"),
+            ("/goal",     "Start a multi-agent goal"),
+            ("/diff",     "Show active diff patch"),
+            ("/sessions", "Switch to sessions tab"),
+        ]
+    }
+
+    /// Returns the filtered list of commands matching the current input.
+    pub fn get_autocomplete_matches(&self) -> Vec<(&'static str, &'static str)> {
+        if !self.input.starts_with('/') || self.input.is_empty() {
+            return Vec::new();
+        }
+        Self::slash_commands()
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(&self.input.as_str()))
+            .copied()
+            .collect()
+    }
+
+    /// Whether the autocomplete popup is currently visible.
+    pub fn is_autocomplete_active(&self) -> bool {
+        self.input.starts_with('/') && !self.get_autocomplete_matches().is_empty()
+    }
+
+    /// Move selection up in the autocomplete list.
+    pub fn autocomplete_up(&mut self) {
+        if self.autocomplete_idx > 0 {
+            self.autocomplete_idx -= 1;
+        }
+    }
+
+    /// Move selection down in the autocomplete list.
+    pub fn autocomplete_down(&mut self) {
+        let count = self.get_autocomplete_matches().len();
+        if count > 0 && self.autocomplete_idx + 1 < count {
+            self.autocomplete_idx += 1;
+        }
+    }
+
+    /// Accept the currently selected autocomplete item, replacing input.
+    pub fn autocomplete_accept(&mut self) {
+        let matches = self.get_autocomplete_matches();
+        if let Some((cmd, _)) = matches.get(self.autocomplete_idx) {
+            self.input = cmd.to_string();
+            self.input_cursor = self.input.len();
+            self.autocomplete_idx = 0;
+        }
     }
 }
 
@@ -1099,48 +1160,47 @@ fn draw_input(f: &mut Frame, area: Rect, state: &TuiState) {
     }
 
     // Autocomplete popup for '/' commands
-    if is_focused && state.input.starts_with('/') {
-        let commands = vec![
-            "/help     - Show help message",
-            "/clear    - Clear conversation",
-            "/config   - Display current config",
-            "/goal     - Start a multi-agent goal",
-            "/diff     - Show active diff patch",
-            "/sessions - Switch to sessions tab",
-        ];
+    if is_focused && state.is_autocomplete_active() {
+        let matched = state.get_autocomplete_matches();
+        let selected = state.autocomplete_idx;
 
-        let matched: Vec<&str> = commands.iter()
-            .filter(|c| c.starts_with(&state.input))
-            .map(|c| *c)
-            .collect();
+        let popup_height = matched.len() as u16 + 2;
+        let popup_width = 42u16.min(area.width.saturating_sub(4));
+        // Place just above the input box
+        let popup_area = Rect {
+            x: area.x + 2,
+            y: area.y.saturating_sub(popup_height),
+            width: popup_width,
+            height: popup_height,
+        };
 
-        if !matched.is_empty() && state.input.len() > 0 {
-            let popup_height = matched.len() as u16 + 2;
-            let popup_width = 40;
-            // Place just above the input box
-            let popup_area = Rect {
-                x: area.x + 2,
-                y: area.y.saturating_sub(popup_height),
-                width: popup_width,
-                height: popup_height,
-            };
+        let items: Vec<Line> = matched.iter().enumerate().map(|(i, (cmd, desc))| {
+            let prefix = if i == selected { "▸ " } else { "  " };
+            let label = format!("{}{:<12}{}", prefix, cmd, desc);
+            if i == selected {
+                Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Palette::BG)
+                        .bg(Palette::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(Span::styled(label, Style::default().fg(Palette::TEXT_BRIGHT)))
+            }
+        }).collect();
 
-            let items: Vec<Line> = matched.into_iter().map(|c| {
-                Line::from(Span::styled(c, Style::default().fg(Palette::TEXT_BRIGHT)))
-            }).collect();
+        let popup = Paragraph::new(items)
+            .block(
+                Block::default()
+                    .title(" Commands ↑↓ Enter ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Palette::ACCENT))
+                    .style(Style::default().bg(Palette::SURFACE2)),
+            );
 
-            let popup = Paragraph::new(items)
-                .block(
-                    Block::default()
-                        .title(" Commands ")
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Palette::ACCENT))
-                        .style(Style::default().bg(Palette::SURFACE2)),
-                );
-
-            f.render_widget(Clear, popup_area);
-            f.render_widget(popup, popup_area);
-        }
+        f.render_widget(Clear, popup_area);
+        f.render_widget(popup, popup_area);
     }
 }
 
