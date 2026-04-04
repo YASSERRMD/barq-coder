@@ -7,6 +7,8 @@ use crate::tools::{CommandRisk, PermissionResult};
 pub struct PermissionManager {
     workspace_root: PathBuf,
     auto_allowed_tools: HashSet<String>,
+    always_deny_tools: HashSet<String>,
+    always_ask_tools: HashSet<String>,
     allowed_dirs: HashSet<PathBuf>,
     blocked_dirs: HashSet<PathBuf>,
     blocked_command_patterns: Vec<String>,
@@ -33,6 +35,8 @@ impl PermissionManager {
         Self {
             workspace_root: root,
             auto_allowed_tools: HashSet::new(),
+            always_deny_tools: HashSet::new(),
+            always_ask_tools: HashSet::new(),
             allowed_dirs: HashSet::new(),
             blocked_dirs: blocked,
             blocked_command_patterns: blocked_patterns,
@@ -115,6 +119,14 @@ impl PermissionManager {
         // If specifically asked, respect it
         if matches!(tool_specific_result, PermissionResult::Ask(_)) {
             return tool_specific_result;
+        }
+
+        if self.always_deny_tools.contains(tool_name) {
+            return PermissionResult::Deny(format!("Tool {} is blacklisted by always_deny_tools", tool_name));
+        }
+
+        if self.always_ask_tools.contains(tool_name) {
+            return PermissionResult::Ask(format!("Tool {} is configured to always ask", tool_name));
         }
 
         // If the tool says allow, we still check our internal policies
