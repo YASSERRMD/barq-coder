@@ -148,7 +148,40 @@ impl Tool for CreateFile {
 
         Ok(json!({
             "created": true,
-            "path": path_str
+            "path": path_str,
+            "diff": build_create_file_diff(path_str, content)
         }))
+    }
+}
+
+fn build_create_file_diff(path: &str, content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut diff = Vec::new();
+    diff.push("--- /dev/null".to_string());
+    diff.push(format!("+++ b/{}", path));
+    diff.push(format!("@@ -0,0 +1,{} @@", lines.len().max(1)));
+
+    for line in lines {
+        diff.push(format!("+{}", line));
+    }
+
+    if content.is_empty() {
+        diff.push("+".to_string());
+    }
+
+    diff.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_create_file_diff;
+
+    #[test]
+    fn create_file_diff_uses_dev_null_header() {
+        let diff = build_create_file_diff("src/new.rs", "fn main() {}\n");
+
+        assert!(diff.contains("--- /dev/null"));
+        assert!(diff.contains("+++ b/src/new.rs"));
+        assert!(diff.contains("+fn main() {}"));
     }
 }

@@ -98,13 +98,15 @@ impl EditFile {
         }
 
         let patched = original.replacen(old_str, new_str, 1);
+        let diff = build_replacement_diff(file_path, &original, &patched);
 
         if preview {
             return Ok(json!({
                 "success": true,
                 "applied": false,
                 "preview": true,
-                "diff": format!("-{}\n+{}", old_str, new_str)
+                "diff": diff,
+                "file_path": file_path
             }));
         }
 
@@ -137,7 +139,9 @@ impl EditFile {
             "success": true,
             "applied": true,
             "reverted": false,
-            "occurrences": 1
+            "occurrences": 1,
+            "diff": diff,
+            "file_path": file_path
         }))
     }
 
@@ -148,7 +152,8 @@ impl EditFile {
                 "success": true,
                 "applied": false,
                 "preview": true,
-                "diff": patch
+                "diff": patch,
+                "file_path": file_path
             }));
         }
 
@@ -192,7 +197,48 @@ impl EditFile {
         Ok(json!({
             "success": true,
             "applied": true,
-            "reverted": false
+            "reverted": false,
+            "diff": patch,
+            "file_path": file_path
         }))
+    }
+}
+
+fn build_replacement_diff(file_path: &str, original: &str, updated: &str) -> String {
+    let old_lines: Vec<&str> = original.lines().collect();
+    let new_lines: Vec<&str> = updated.lines().collect();
+
+    let mut diff = Vec::new();
+    diff.push(format!("--- a/{}", file_path));
+    diff.push(format!("+++ b/{}", file_path));
+    diff.push(format!(
+        "@@ -1,{} +1,{} @@",
+        old_lines.len().max(1),
+        new_lines.len().max(1)
+    ));
+
+    for line in old_lines {
+        diff.push(format!("-{}", line));
+    }
+
+    for line in new_lines {
+        diff.push(format!("+{}", line));
+    }
+
+    diff.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_replacement_diff;
+
+    #[test]
+    fn replacement_diff_includes_headers_and_content() {
+        let diff = build_replacement_diff("src/main.rs", "fn main() {}", "fn main() {\n    println!(\"hi\");\n}");
+
+        assert!(diff.contains("--- a/src/main.rs"));
+        assert!(diff.contains("+++ b/src/main.rs"));
+        assert!(diff.contains("-fn main() {}"));
+        assert!(diff.contains("+fn main() {"));
     }
 }
