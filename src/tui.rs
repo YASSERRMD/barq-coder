@@ -282,7 +282,7 @@ impl TuiState {
             file_preview: Vec::new(),
             sidebar_visible: true,
             tool_log: Vec::new(),
-            tool_scroll: 0,
+            tool_scroll: usize::MAX,
             current_tool: None,
             barq_context: Vec::new(),
             diff_content: Vec::new(),
@@ -1104,7 +1104,13 @@ fn draw_tool_log(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let total = log_lines.len();
     let height = area.height.saturating_sub(2) as usize;
     let scroll = if total > height {
-        (total - height) as u16
+        if state.tool_scroll == usize::MAX || state.tool_scroll + height >= total {
+            let bottom = total.saturating_sub(height);
+            state.tool_scroll = bottom;
+            bottom as u16
+        } else {
+            state.tool_scroll.min(total.saturating_sub(height)) as u16
+        }
     } else {
         0
     };
@@ -1604,10 +1610,11 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
     let keys: &[(&str, &str)] = match state.active_tab {
         ActiveTab::Chat => &[
             ("Enter", "Send"),
-            ("↑/↓", "History"),
+            ("↑/↓", "Move"),
+            ("F1", "Focus"),
             ("Tab", "Next Tab"),
             ("Alt+S", "Toggle Sidebar"),
-            ("PgUp/Dn", "Scroll Chat"),
+            ("PgUp/Dn", "Scroll"),
             ("Esc", "Quit"),
         ],
         ActiveTab::Diff => &[
