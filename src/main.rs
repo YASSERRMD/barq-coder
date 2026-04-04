@@ -108,6 +108,127 @@ fn collect_saved_sessions(session_store: &SessionStore) -> Vec<SessionEntry> {
         .collect()
 }
 
+fn refresh_tui_previews(app: &mut App) {
+    refresh_file_preview(app);
+    refresh_session_preview(app);
+}
+
+fn refresh_file_preview(app: &mut App) {
+    let Some(idx) = app.tui.file_list_state.selected() else {
+        app.tui.file_preview_title = "File Preview".to_string();
+        app.tui.file_preview.clear();
+        return;
+    };
+
+    let Some(relative_path) = app.tui.workspace_files.get(idx) else {
+        app.tui.file_preview_title = "File Preview".to_string();
+        app.tui.file_preview.clear();
+        return;
+    };
+
+    let full_path = std::path::Path::new(&app.config.workspace_root).join(relative_path);
+    app.tui.file_preview_title = format!("Preview • {}", relative_path);
+
+    match std::fs::read_to_string(&full_path) {
+        Ok(content) => {
+            let lines: Vec<&str> = content.lines().collect();
+            let preview_limit = 12usize;
+            let mut preview = lines
+                .iter()
+                .take(preview_limit)
+                .enumerate()
+                .map(|(idx, line)| format!("{:>3} {}", idx + 1, line))
+                .collect::<Vec<_>>();
+
+            if lines.len() > preview_limit {
+                preview.push(format!("… {} more lines", lines.len() - preview_limit));
+            }
+
+            if preview.is_empty() {
+                preview.push("(empty file)".to_string());
+            }
+
+            app.tui.file_preview = preview;
+        }
+        Err(err) => {
+            app.tui.file_preview = vec![format!("Unable to read {}: {}", relative_path, err)];
+        }
+    }
+}
+
+fn session_preview_line(event: &SessionEvent) -> String {
+    match event {
+        SessionEvent::UserInput { content, .. } => format!("You: {}", content.lines().next().unwrap_or_default()),
+        SessionEvent::AssistantMessage { content, .. } => {
+            format!("Barq: {}", content.lines().next().unwrap_or_default())
+        }
+        SessionEvent::ToolCall { name, .. } => format!("Tool call: {}", name),
+        SessionEvent::ToolResult { name, result, .. } => summarize_tool_result(name, result),
+        SessionEvent::EditApplied { file, .. } => format!("Edit applied: {}", file),
+        SessionEvent::Error { message, .. } => format!("Error: {}", message),
+        SessionEvent::Verification { step_id, approved, .. } => {
+            format!("Verification {}: {}", step_id, if *approved { "approved" } else { "failed" })
+        }
+        SessionEvent::CompactBoundary { summary, .. } => {
+            format!("Compacted: {}", summary.lines().next().unwrap_or_default())
+        }
+        SessionEvent::System { subtype, content, .. } => {
+            format!("System [{}]: {}", subtype, content.lines().next().unwrap_or_default())
+        }
+    }
+}
+
+fn describe_timestamp(ts: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let diff = now.saturating_sub(ts);
+    if diff < 60 {
+        format!("{}s ago", diff)
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
+}
+
+fn refresh_session_preview(app: &mut App) {
+    let Some(idx) = app.tui.session_list_state.selected() else {
+        app.tui.session_preview_title = "Session Preview".to_string();
+        app.tui.session_preview.clear();
+        return;
+    };
+
+    let Some(session) = app.tui.sessions.get(idx) else {
+        app.tui.session_preview_title = "Session Preview".to_string();
+        app.tui.session_preview.clear();
+        return;
+    };
+
+    app.tui.session_preview_title = format!("Preview • {}", session.id);
+    match app.session_store.load(&session.id) {
+        Ok(events) => {
+            let mut preview = vec![
+                format!("Workspace: {}", session.workspace),
+                format!("Created: {}", describe_timestamp(session.created_at)),
+                format!("Events: {}", events.len()),
+                String::new(),
+                "Recent activity:".to_string(),
+            ];
+
+            let recent = events.iter().rev().take(12).rev().map(session_preview_line);
+            preview.extend(recent);
+            app.tui.session_preview = preview;
+        }
+        Err(err) => {
+            app.tui.session_preview = vec![format!("Unable to load {}: {}", session.id, err)];
+        }
+    }
+}
+
 fn refresh_tui_metadata(app: &mut App) {
     let file_selection = app.tui.file_list_state.selected().unwrap_or(0);
     let session_selection = app.tui.session_list_state.selected().unwrap_or(0);
@@ -126,6 +247,8 @@ fn refresh_tui_metadata(app: &mut App) {
     } else {
         app.tui.session_list_state.select(Some(session_selection.min(app.tui.sessions.len() - 1)));
     }
+
+    refresh_tui_previews(app);
 }
 
 fn summarize_tool_result(name: &str, result: &serde_json::Value) -> String {
@@ -264,7 +387,7 @@ impl App {
         tui.workspace_files = workspace_files;
         tui.sessions = saved_sessions;
 
-        Self {
+        let mut app = Self {
             tui,
             orchestrator,
             config,
@@ -276,7 +399,9 @@ impl App {
             pending_budget_request: None,
             cost: CostTracker::new(),
             skip_permissions: cli.dangerously_skip_permissions,
-        }
+        };
+        refresh_tui_metadata(&mut app);
+        app
     }
 
     /// Load past session events into the UI
@@ -815,18 +940,35 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
 
         // History
         KeyCode::Up => {
-            if app.tui.focus == Focus::Input {
-                app.tui.history_prev();
-            } else {
-                // scroll chat
-                app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(1);
+            match app.tui.focus {
+                Focus::Input => app.tui.history_prev(),
+                Focus::Sidebar => {
+                    let len = app.tui.workspace_files.len();
+                    if len > 0 {
+                        let cur = app.tui.file_list_state.selected().unwrap_or(0);
+                        app.tui.file_list_state.select(Some(cur.saturating_sub(1)));
+                        refresh_tui_previews(app);
+                    }
+                }
+                _ => {
+                    app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(1);
+                }
             }
         }
         KeyCode::Down => {
-            if app.tui.focus == Focus::Input {
-                app.tui.history_next();
-            } else {
-                app.tui.chat_scroll += 1;
+            match app.tui.focus {
+                Focus::Input => app.tui.history_next(),
+                Focus::Sidebar => {
+                    let len = app.tui.workspace_files.len();
+                    if len > 0 {
+                        let cur = app.tui.file_list_state.selected().unwrap_or(0);
+                        app.tui.file_list_state.select(Some((cur + 1).min(len - 1)));
+                        refresh_tui_previews(app);
+                    }
+                }
+                _ => {
+                    app.tui.chat_scroll += 1;
+                }
             }
         }
 
@@ -874,9 +1016,11 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Up => {
             app.tui.session_list_state.select(Some(cur.saturating_sub(1)));
+            refresh_tui_previews(app);
         }
         KeyCode::Down => {
             app.tui.session_list_state.select(Some((cur + 1).min(len - 1)));
+            refresh_tui_previews(app);
         }
         KeyCode::Enter => {
             // Replay selected session — push events as chat messages
