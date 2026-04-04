@@ -1632,6 +1632,7 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
             ("↑/↓", "Select"),
             ("PgUp/Dn", "Scroll Preview"),
             ("Y", "Approve"),
+            ("A", "Remember"),
             ("N", "Reject"),
             ("Tab", "Next Tab"),
             ("Esc", "Quit"),

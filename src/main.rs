@@ -70,8 +70,15 @@ struct App {
 
 struct PendingPermissionRequest {
     name: String,
+    args: serde_json::Value,
     reason: String,
     tx: tokio::sync::oneshot::Sender<bool>,
+}
+
+enum PermissionDecision {
+    AllowOnce,
+    AllowRemembered,
+    Deny,
 }
 
 fn collect_workspace_files(workspace_root: &str) -> Vec<String> {
@@ -418,11 +425,70 @@ fn build_pending_action(name: &str, args: &serde_json::Value, reason: &str) -> t
     }
 }
 
+fn remember_permission_scope(app: &App, request: &PendingPermissionRequest) -> anyhow::Result<String> {
+    match request.name.as_str() {
+        "edit_file" | "create_file" => {
+            app.orchestrator.permissions.allow_edits_for_session();
+            Ok("Accepted edits for the rest of this session".to_string())
+        }
+        "shell_exec" => {
+            let command = request
+                .args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Missing shell command"))?;
+            app.orchestrator.permissions.remember_shell_command(command)?;
+            Ok(format!(
+                "Saved local allow rule for Bash({}) in .claude/settings.local.json",
+                command
+            ))
+        }
+        "git_ops" => {
+            let operation = request
+                .args
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Missing git operation"))?;
+            let git_args = request
+                .args
+                .get("args")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            app.orchestrator
+                .permissions
+                .remember_git_command(operation, git_args)?;
+            let command = if git_args.trim().is_empty() {
+                format!("git {}", operation)
+            } else {
+                format!("git {} {}", operation, git_args.trim())
+            };
+            Ok(format!(
+                "Saved local allow rule for Git({}) in .claude/settings.local.json",
+                command
+            ))
+        }
+        _ => {
+            app.orchestrator.permissions.auto_allow_tool(&request.name);
+            Ok(format!("Auto-allowed {} for this session", request.name))
+        }
+    }
+}
+
+fn approval_hint(name: &str) -> &'static str {
+    match name {
+        "edit_file" | "create_file" => "[Y] once  [A] accept edits this session  [N] deny",
+        "shell_exec" | "git_ops" => "[Y] once  [A] save local allow rule  [N] deny",
+        _ => "[Y] once  [A] remember for this session  [N] deny",
+    }
+}
+
 fn show_permission_prompt(app: &mut App) {
     if let Some(next) = app.pending_permission_requests.front() {
         app.tui.add_message(ChatMessage::system(format!(
-            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nReview in Sandbox and press [Y] / [N], or [Esc] to deny all.",
-            next.name, next.reason
+            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nReview in Sandbox and use {}. [Esc] denies all.",
+            next.name,
+            next.reason,
+            approval_hint(&next.name)
         )));
         app.tui.set_status(
             format!("Pending approval: '{}' [{} queued]", next.name, app.pending_permission_requests.len()),
@@ -441,6 +507,7 @@ fn queue_permission_request(
     let action = build_pending_action(&name, &args, &reason);
     app.pending_permission_requests.push_back(PendingPermissionRequest {
         name,
+        args,
         reason,
         tx,
     });
@@ -455,15 +522,45 @@ fn queue_permission_request(
     show_permission_prompt(app);
 }
 
-fn resolve_permission_request(app: &mut App, index: usize, approved: bool) {
+fn resolve_permission_request(app: &mut App, index: usize, decision: PermissionDecision) {
     if index >= app.pending_permission_requests.len() || index >= app.tui.action_queue.len() {
         return;
     }
 
     if let Some(request) = app.pending_permission_requests.remove(index) {
-        let _ = request.tx.send(approved);
-        let outcome = if approved { "Approved" } else { "Denied" };
-        app.tui.add_message(ChatMessage::system(format!("{}: {}", outcome, request.name)));
+        let approval = matches!(
+            decision,
+            PermissionDecision::AllowOnce | PermissionDecision::AllowRemembered
+        );
+
+        match decision {
+            PermissionDecision::AllowOnce => {
+                let _ = request.tx.send(true);
+                app.tui
+                    .add_message(ChatMessage::system(format!("Approved once: {}", request.name)));
+            }
+            PermissionDecision::AllowRemembered => match remember_permission_scope(app, &request) {
+                Ok(summary) => {
+                    let _ = request.tx.send(true);
+                    app.tui.add_message(ChatMessage::system(format!(
+                        "Approved and remembered: {}\n{}",
+                        request.name, summary
+                    )));
+                }
+                Err(err) => {
+                    let _ = request.tx.send(true);
+                    app.tui.add_message(ChatMessage::error(format!(
+                        "Approved {}, but failed to persist scope: {}",
+                        request.name, err
+                    )));
+                }
+            },
+            PermissionDecision::Deny => {
+                let _ = request.tx.send(false);
+                app.tui
+                    .add_message(ChatMessage::system(format!("Denied: {}", request.name)));
+            }
+        }
     }
 
     app.tui.action_queue.remove(index);
@@ -484,7 +581,7 @@ fn resolve_permission_request(app: &mut App, index: usize, approved: bool) {
 
 fn deny_all_permission_requests(app: &mut App) {
     while !app.pending_permission_requests.is_empty() && !app.tui.action_queue.is_empty() {
-        resolve_permission_request(app, 0, false);
+        resolve_permission_request(app, 0, PermissionDecision::Deny);
     }
     app.tui.is_thinking = true;
 }
@@ -933,7 +1030,7 @@ async fn run_app<B: ratatui::backend::Backend>(
 fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     // ── PERMISSION GATE ─────────────────────────────────────────────────
     // When there are pending permission requests, ALL key input is
-    // captured here. Y/N resolve the selected sandbox action, Esc denies
+    // captured here. Y/N/A resolve the selected sandbox action, Esc denies
     // everything, and ActionQueue navigation keys stay enabled.
     if !app.pending_permission_requests.is_empty() {
         match key {
@@ -943,7 +1040,16 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
                 } else {
                     0
                 };
-                resolve_permission_request(app, selected, true);
+                resolve_permission_request(app, selected, PermissionDecision::AllowOnce);
+                return;
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                let selected = if app.tui.active_tab == ActiveTab::ActionQueue {
+                    app.tui.action_queue_selected.min(app.pending_permission_requests.len().saturating_sub(1))
+                } else {
+                    0
+                };
+                resolve_permission_request(app, selected, PermissionDecision::AllowRemembered);
                 return;
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -952,7 +1058,7 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
                 } else {
                     0
                 };
-                resolve_permission_request(app, selected, false);
+                resolve_permission_request(app, selected, PermissionDecision::Deny);
                 return;
             }
             KeyCode::Esc => {
@@ -1304,11 +1410,15 @@ fn handle_action_queue_keys(app: &mut App, key: KeyCode) {
         }
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             let selected = app.tui.action_queue_selected.min(app.pending_permission_requests.len().saturating_sub(1));
-            resolve_permission_request(app, selected, true);
+            resolve_permission_request(app, selected, PermissionDecision::AllowOnce);
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            let selected = app.tui.action_queue_selected.min(app.pending_permission_requests.len().saturating_sub(1));
+            resolve_permission_request(app, selected, PermissionDecision::AllowRemembered);
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
             let selected = app.tui.action_queue_selected.min(app.pending_permission_requests.len().saturating_sub(1));
-            resolve_permission_request(app, selected, false);
+            resolve_permission_request(app, selected, PermissionDecision::Deny);
         }
         _ => {}
     }
@@ -1480,7 +1590,7 @@ Keys:
   Tab / Shift+Tab Switch tabs
   Alt+S           Toggle sidebar
   F1              Cycle focus (Input / Sidebar / Chat / Tool Activity)
-  Y / N           Approve or deny the selected Sandbox action
+  Y / A / N       Approve once, remember, or deny the selected Sandbox action
   Esc             Quit";
 
 // ─────────────────────────────────────────────────────────────────────────────
