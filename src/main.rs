@@ -1475,11 +1475,12 @@ Slash commands (agent-aware):
 
 Keys:
   Enter           Send message
-  ↑/↓             Navigate input history / scroll
+  ↑/↓             Navigate history or the focused pane
   PageUp/Down     Scroll chat
   Tab / Shift+Tab Switch tabs
   Alt+S           Toggle sidebar
-  F1              Toggle sidebar focus
+  F1              Cycle focus (Input / Sidebar / Chat / Tool Activity)
+  Y / N           Approve or deny the selected Sandbox action
   Esc             Quit";
 
 // ─────────────────────────────────────────────────────────────────────────────
