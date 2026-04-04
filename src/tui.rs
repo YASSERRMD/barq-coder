@@ -217,6 +217,8 @@ pub struct TuiState {
     // Sidebar / file tree
     pub workspace_files: Vec<String>,
     pub file_list_state: ListState,
+    pub file_preview_title: String,
+    pub file_preview: Vec<String>,
     pub sidebar_visible: bool,
 
     // Tool log
@@ -240,6 +242,8 @@ pub struct TuiState {
     // Sessions
     pub sessions: Vec<SessionEntry>,
     pub session_list_state: ListState,
+    pub session_preview_title: String,
+    pub session_preview: Vec<String>,
 
     // Status
     pub is_thinking: bool,
@@ -274,9 +278,11 @@ impl TuiState {
                 s.select(Some(0));
                 s
             },
+            file_preview_title: "File Preview".to_string(),
+            file_preview: Vec::new(),
             sidebar_visible: true,
             tool_log: Vec::new(),
-            tool_scroll: 0,
+            tool_scroll: usize::MAX,
             current_tool: None,
             barq_context: Vec::new(),
             diff_content: Vec::new(),
@@ -291,6 +297,8 @@ impl TuiState {
                 s.select(Some(0));
                 s
             },
+            session_preview_title: "Session Preview".to_string(),
+            session_preview: Vec::new(),
             is_thinking: false,
             is_indexing: false,
             tick: 0,
@@ -712,6 +720,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),    // file list
+            Constraint::Length(10), // file preview
             Constraint::Length(6), // barq context summary
         ])
         .split(area);
@@ -769,6 +778,44 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
     f.render_stateful_widget(file_list, chunks[0], &mut state.file_list_state);
 
+    let preview_lines: Vec<Line> = if state.file_preview.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                "  Select a file to preview it here.",
+                Style::default()
+                    .fg(Palette::TEXT_DIM)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+        ]
+    } else {
+        state
+            .file_preview
+            .iter()
+            .map(|line| Line::from(Span::styled(line.as_str(), Style::default().fg(Palette::TEXT))))
+            .collect()
+    };
+
+    let preview = Paragraph::new(preview_lines)
+        .block(
+            Block::default()
+                .title(Line::from(vec![
+                    Span::styled("  ", Style::default().fg(Palette::ACCENT)),
+                    Span::styled(
+                        state.file_preview_title.as_str(),
+                        Style::default()
+                            .fg(Palette::TEXT_BRIGHT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Palette::BORDER))
+                .style(Style::default().bg(Palette::SURFACE))
+                .padding(Padding::horizontal(1)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(preview, chunks[1]);
+
     // Context summary
     let ctx_lines: Vec<Line> = state
         .barq_context
@@ -805,7 +852,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 .padding(Padding::horizontal(1)),
         )
         .wrap(Wrap { trim: true });
-    f.render_widget(ctx_p, chunks[1]);
+    f.render_widget(ctx_p, chunks[2]);
 }
 
 // ─────────────────────────────────────────────
@@ -1057,7 +1104,13 @@ fn draw_tool_log(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let total = log_lines.len();
     let height = area.height.saturating_sub(2) as usize;
     let scroll = if total > height {
-        (total - height) as u16
+        if state.tool_scroll == usize::MAX || state.tool_scroll + height >= total {
+            let bottom = total.saturating_sub(height);
+            state.tool_scroll = bottom;
+            bottom as u16
+        } else {
+            state.tool_scroll.min(total.saturating_sub(height)) as u16
+        }
     } else {
         0
     };
@@ -1356,6 +1409,11 @@ fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
         return;
     }
 
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(area);
+
     let items: Vec<ListItem> = state
         .sessions
         .iter()
@@ -1374,9 +1432,13 @@ fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 Line::from(vec![
                     Span::styled("     ", Style::default()),
                     Span::styled(
-                        format!("{} • {} events • {}", time, s.event_count, s.workspace),
+                        format!("{} • {} events", time, s.event_count),
                         Style::default().fg(Palette::TEXT_DIM),
                     ),
+                ]),
+                Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled(s.workspace.as_str(), Style::default().fg(Palette::TEXT_DIM)),
                 ]),
                 Line::raw(""),
             ])
@@ -1404,7 +1466,41 @@ fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
         )
         .highlight_symbol("▶ ");
 
-    f.render_stateful_widget(list, area, &mut state.session_list_state);
+    f.render_stateful_widget(list, chunks[0], &mut state.session_list_state);
+
+    let preview_lines: Vec<Line> = if state.session_preview.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                "  Select a session to inspect its latest activity.",
+                Style::default()
+                    .fg(Palette::TEXT_DIM)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+        ]
+    } else {
+        state
+            .session_preview
+            .iter()
+            .map(|line| Line::from(Span::styled(line.as_str(), Style::default().fg(Palette::TEXT))))
+            .collect()
+    };
+
+    let preview = Paragraph::new(preview_lines)
+        .block(
+            Block::default()
+                .title(Line::from(Span::styled(
+                    format!(" {} ", state.session_preview_title),
+                    Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+                )))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Palette::BORDER))
+                .style(Style::default().bg(Palette::SURFACE))
+                .padding(Padding::horizontal(1)),
+        )
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(preview, chunks[1]);
 }
 
 // ─────────────────────────────────────────────
@@ -1514,10 +1610,11 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
     let keys: &[(&str, &str)] = match state.active_tab {
         ActiveTab::Chat => &[
             ("Enter", "Send"),
-            ("↑/↓", "History"),
+            ("↑/↓", "Move"),
+            ("F1", "Focus"),
             ("Tab", "Next Tab"),
             ("Alt+S", "Toggle Sidebar"),
-            ("PgUp/Dn", "Scroll Chat"),
+            ("PgUp/Dn", "Scroll"),
             ("Esc", "Quit"),
         ],
         ActiveTab::Diff => &[
