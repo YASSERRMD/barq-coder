@@ -23,6 +23,7 @@ mod commands;
 mod config;
 mod context;
 mod cost_tracker;
+mod daemon;
 mod lsp;
 mod macro_goals;
 mod memory;
