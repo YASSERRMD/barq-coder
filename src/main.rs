@@ -1770,7 +1770,10 @@ async fn start_health_server() {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pending_action, build_permission_preview};
+    use super::{
+        build_pending_action, build_permission_preview, summarize_tool_call, truncate_multiline,
+        PERMISSION_PREVIEW_MAX_LINES,
+    };
     use crate::tui::ActionKind;
     use serde_json::json;
 
@@ -1799,5 +1802,58 @@ mod tests {
             }
             other => panic!("unexpected action kind: {:?}", other),
         }
+    }
+
+    #[test]
+    fn tool_call_summary_avoids_dumping_large_file_content() {
+        let large_content = "fn main() {}\n".repeat(200);
+        let summary = summarize_tool_call(
+            "create_file",
+            &json!({
+                "path": "src/generated.rs",
+                "content": large_content,
+            }),
+        );
+
+        assert!(summary.contains("Calling create_file for src/generated.rs"));
+        assert!(summary.contains("content: 200 lines"));
+        assert!(!summary.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn pending_action_preview_is_truncated_for_large_writes() {
+        let content = (0..(PERMISSION_PREVIEW_MAX_LINES + 50))
+            .map(|idx| format!("line {}", idx))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let action = build_pending_action(
+            "create_file",
+            &json!({
+                "path": "src/generated.rs",
+                "content": content,
+            }),
+            "Create a generated file",
+        );
+
+        match action.kind {
+            ActionKind::WriteFile { patch, .. } => {
+                assert!(patch.contains("… truncated"));
+                assert!(!patch.contains(&format!("line {}", PERMISSION_PREVIEW_MAX_LINES + 40)));
+            }
+            other => panic!("unexpected action kind: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn truncate_multiline_adds_a_truncation_notice() {
+        let text = (0..20)
+            .map(|idx| format!("entry {}", idx))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let truncated = truncate_multiline(&text, 5, 128);
+
+        assert!(truncated.contains("entry 0"));
+        assert!(truncated.contains("… truncated"));
+        assert!(!truncated.contains("entry 19"));
     }
 }
