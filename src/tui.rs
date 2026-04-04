@@ -230,6 +230,7 @@ pub struct TuiState {
     // Diff view
     pub diff_content: Vec<String>,
     pub diff_scroll: usize,
+    pub diff_title: String,
 
     // Action Sandbox (Phase 3)
     pub action_queue: Vec<PendingAction>,
@@ -280,6 +281,7 @@ impl TuiState {
             barq_context: Vec::new(),
             diff_content: Vec::new(),
             diff_scroll: 0,
+            diff_title: "Latest Diff".to_string(),
             action_queue: Vec::new(),
             action_queue_selected: 0,
             action_preview_scroll: 0,
@@ -320,9 +322,18 @@ impl TuiState {
         self.chat_scroll = usize::MAX;
     }
 
-    pub fn set_diff(&mut self, patch: &str) {
+    pub fn update_diff(&mut self, title: impl Into<String>, patch: &str) {
+        self.diff_title = title.into();
         self.diff_content = patch.lines().map(|l| l.to_string()).collect();
         self.diff_scroll = 0;
+    }
+
+    pub fn set_diff(&mut self, patch: &str) {
+        self.update_diff("Latest Diff", patch);
+        self.active_tab = ActiveTab::Diff;
+    }
+
+    pub fn open_diff(&mut self) {
         self.active_tab = ActiveTab::Diff;
     }
 
@@ -1221,7 +1232,7 @@ fn draw_diff_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
             )),
             Line::raw(""),
             Line::from(Span::styled(
-                "  Run a code edit from the Chat tab and the diff will appear here.",
+                "  Run a file mutation from the Chat tab and the latest patch will appear here.",
                 Style::default().fg(Palette::TEXT_DIM),
             )),
         ])
@@ -1282,7 +1293,7 @@ fn draw_diff_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
             Block::default()
                 .title(Line::from(vec![
                     Span::styled(
-                        "  Diff View ",
+                        format!("  {} ", state.diff_title),
                         Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
