@@ -62,7 +62,7 @@ struct App {
     event_rx: Option<mpsc::Receiver<OrchestratorEvent>>,
     session_store: SessionStore,
     session_id: String,
-    pending_permission_request: Option<tokio::sync::oneshot::Sender<bool>>,
+    pending_permission_requests: std::collections::VecDeque<(String, serde_json::Value, String, tokio::sync::oneshot::Sender<bool>)>,
     pending_budget_request: Option<tokio::sync::oneshot::Sender<bool>>,
     cost: CostTracker,
     skip_permissions: bool,
@@ -172,7 +172,7 @@ impl App {
             event_rx: None,
             session_store,
             session_id,
-            pending_permission_request: None,
+            pending_permission_requests: std::collections::VecDeque::new(),
             pending_budget_request: None,
             cost: CostTracker::new(),
             skip_permissions: cli.dangerously_skip_permissions,
@@ -424,11 +424,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     OrchestratorEvent::PermissionRequested { name, args, reason, tx } => {
                         app.tui.current_tool = None;
-                        app.tui.add_message(ChatMessage::system(format!(
-                            "Permission requested for tool '{}': {}\nPress [Y] to allow or [N] to deny.",
-                            name, reason
-                        )));
-                        app.pending_permission_request = Some(tx);
+                        app.pending_permission_requests.push_back((name.clone(), args.clone(), reason.clone(), tx));
+                        
+                        // If it's the only one, show it immediately. Otherwise it will be shown when popped.
+                        if app.pending_permission_requests.len() == 1 {
+                            app.tui.add_message(ChatMessage::system(format!(
+                                "Permission requested for tool '{}': {}\nPress [Y] to allow or [N] to deny.",
+                                name, reason
+                            )));
+                        }
                     }
                     OrchestratorEvent::BudgetWarning { used_usd, cap_usd, pct } => {
                         app.tui.set_status(
@@ -503,18 +507,34 @@ async fn run_app<B: ratatui::backend::Backend>(
 // ─────────────────────────────────────────────────────────────────────────────
 fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     // Intercept Y/N if waiting for permission
-    if app.pending_permission_request.is_some() {
+    if !app.pending_permission_requests.is_empty() {
         if let KeyCode::Char('y') | KeyCode::Char('Y') = key {
-            if let Some(tx) = app.pending_permission_request.take() {
+            if let Some((_, _, _, tx)) = app.pending_permission_requests.pop_front() {
                 let _ = tx.send(true);
                 app.tui.add_message(ChatMessage::system("Permission granted."));
+                
+                // Show next if there is one
+                if let Some((name, _, reason, _)) = app.pending_permission_requests.front() {
+                    app.tui.add_message(ChatMessage::system(format!(
+                        "Next permission requested for tool '{}': {}\nPress [Y] to allow or [N] to deny.",
+                        name, reason
+                    )));
+                }
             }
             return;
         }
         if let KeyCode::Char('n') | KeyCode::Char('N') = key {
-            if let Some(tx) = app.pending_permission_request.take() {
+            if let Some((_, _, _, tx)) = app.pending_permission_requests.pop_front() {
                 let _ = tx.send(false);
                 app.tui.add_message(ChatMessage::system("Permission denied."));
+                
+                // Show next if there is one
+                if let Some((name, _, reason, _)) = app.pending_permission_requests.front() {
+                    app.tui.add_message(ChatMessage::system(format!(
+                        "Next permission requested for tool '{}': {}\nPress [Y] to allow or [N] to deny.",
+                        name, reason
+                    )));
+                }
             }
             return;
         }
