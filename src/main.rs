@@ -484,11 +484,18 @@ fn approval_hint(name: &str) -> &'static str {
 
 fn show_permission_prompt(app: &mut App) {
     if let Some(next) = app.pending_permission_requests.front() {
+        let hint = approval_hint(&next.name).to_string();
+        app.tui.permission_prompt = Some(tui::PermissionPrompt {
+            title: format!("Tool: {}", next.name),
+            reason: next.reason.clone(),
+            hint: hint.clone(),
+            queue_len: app.pending_permission_requests.len(),
+        });
         app.tui.add_message(ChatMessage::system(format!(
             ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nReview in Sandbox and use {}. [Esc] denies all.",
             next.name,
             next.reason,
-            approval_hint(&next.name)
+            hint
         )));
         app.tui.set_status(
             format!("Pending approval: '{}' [{} queued]", next.name, app.pending_permission_requests.len()),
@@ -518,7 +525,6 @@ fn queue_permission_request(
         app.tui.action_queue_selected = app.tui.action_queue_selected.min(app.tui.action_queue.len() - 1);
     }
     app.tui.action_preview_scroll = 0;
-    app.tui.active_tab = ActiveTab::ActionQueue;
     show_permission_prompt(app);
 }
 
@@ -572,6 +578,7 @@ fn resolve_permission_request(app: &mut App, index: usize, decision: PermissionD
     app.tui.action_preview_scroll = 0;
 
     if app.pending_permission_requests.is_empty() {
+        app.tui.permission_prompt = None;
         app.tui.clear_status();
         app.tui.is_thinking = true;
     } else {
@@ -583,6 +590,7 @@ fn deny_all_permission_requests(app: &mut App) {
     while !app.pending_permission_requests.is_empty() && !app.tui.action_queue.is_empty() {
         resolve_permission_request(app, 0, PermissionDecision::Deny);
     }
+    app.tui.permission_prompt = None;
     app.tui.is_thinking = true;
 }
 
