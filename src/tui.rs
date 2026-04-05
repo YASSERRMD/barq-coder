@@ -677,31 +677,42 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
 // Header: logo + tab bar + session info
 // ─────────────────────────────────────────────
 fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
+    let wide = area.width >= 100;
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(22), // logo
-            Constraint::Min(0),     // tab bar
-            Constraint::Length(36), // session info
-        ])
+        .constraints(if wide {
+            vec![
+                Constraint::Length(22), // logo
+                Constraint::Min(0),     // tab bar
+                Constraint::Length(36), // session info
+            ]
+        } else {
+            vec![
+                Constraint::Length(0),  // hide logo on narrow
+                Constraint::Min(0),     // tab bar takes all
+                Constraint::Length(30), // compact info
+            ]
+        })
         .split(area);
 
-    // Logo
-    let logo = Paragraph::new(Span::styled(
-        " ⚡ BarqCoder ",
-        Style::default()
-            .fg(Palette::ACCENT)
-            .add_modifier(Modifier::BOLD),
-    ))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Palette::BORDER))
-            .style(Style::default().bg(Palette::SURFACE)),
-    )
-    .alignment(Alignment::Center);
-    f.render_widget(logo, cols[0]);
+    // Logo (only on wide terminals)
+    if wide {
+        let logo = Paragraph::new(Span::styled(
+            " \u{26A1} BarqCoder ",
+            Style::default()
+                .fg(Palette::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Palette::BORDER))
+                .style(Style::default().bg(Palette::SURFACE)),
+        )
+        .alignment(Alignment::Center);
+        f.render_widget(logo, cols[0]);
+    }
 
     // Tab bar
     let tab_titles: Vec<Line> = vec![
@@ -833,34 +844,56 @@ fn draw_body(f: &mut Frame, area: Rect, state: &mut TuiState) {
 // Chat tab
 // ─────────────────────────────────────────────
 fn draw_chat_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    // Horizontal: sidebar | main
-    let h_chunks = if state.sidebar_visible {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(0)])
-            .split(area)
+    let term_width = area.width;
+    let term_height = area.height;
+
+    // Auto-hide sidebar on narrow terminals
+    let show_sidebar = state.sidebar_visible && term_width >= 80;
+
+    // Responsive sidebar width
+    let sidebar_width = if show_sidebar {
+        if term_width >= 140 {
+            32u16
+        } else if term_width >= 100 {
+            28
+        } else {
+            24
+        }
     } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(0), Constraint::Min(0)])
-            .split(area)
+        0
     };
 
-    if state.sidebar_visible {
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(sidebar_width), Constraint::Min(0)])
+        .split(area);
+
+    if show_sidebar {
         draw_sidebar(f, h_chunks[0], state);
     }
 
     // Main area: chat history | tool log | input
     let main_area = h_chunks[1];
+
     // Dynamically size input based on content lines (min 3, max 8)
     let input_lines = state.input.lines().count().max(1);
     let input_height = (input_lines as u16 + 2).clamp(3, 8);
+
+    // Responsive tool log: smaller on short terminals
+    let tool_log_height = if term_height >= 40 {
+        10u16
+    } else if term_height >= 30 {
+        8
+    } else {
+        5
+    };
+
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),             // chat
-            Constraint::Length(8),           // tool log
-            Constraint::Length(input_height), // input (dynamic)
+            Constraint::Min(6),                // chat (takes remaining space)
+            Constraint::Length(tool_log_height), // tool log (responsive)
+            Constraint::Length(input_height),    // input (dynamic)
         ])
         .split(main_area);
 
