@@ -26,6 +26,7 @@ mod cost_tracker;
 mod daemon;
 mod lsp;
 mod macro_goals;
+mod markdown;
 mod memory;
 mod mcp;
 mod orchestrator;
@@ -1298,71 +1299,81 @@ fn cycle_focus(current: Focus, sidebar_visible: bool) -> Focus {
     }
 }
 
-fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
+fn handle_chat_keys(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     // ── Autocomplete interception ──
-    // When the autocomplete popup is visible, Up/Down navigate it,
-    // Tab accepts the selection, and Enter accepts then submits.
     if app.tui.is_autocomplete_active() {
         match key {
-            KeyCode::Up => {
-                app.tui.autocomplete_up();
-                return;
-            }
-            KeyCode::Down => {
-                app.tui.autocomplete_down();
-                return;
-            }
-            KeyCode::Tab => {
-                app.tui.autocomplete_accept();
-                return;
-            }
+            KeyCode::Up => { app.tui.autocomplete_up(); return; }
+            KeyCode::Down => { app.tui.autocomplete_down(); return; }
+            KeyCode::Tab => { app.tui.autocomplete_accept(); return; }
             KeyCode::Enter => {
                 app.tui.autocomplete_accept();
-                // Fall through to submit the accepted command
                 if let Some(input) = app.tui.commit_input() {
                     submit_input(app, &input);
                 }
                 return;
             }
             KeyCode::Esc => {
-                // Dismiss autocomplete by clearing input
                 app.tui.input.clear();
                 app.tui.input_cursor = 0;
                 app.tui.autocomplete_idx = 0;
                 return;
             }
-            _ => {} // Let other keys (Char, Backspace, etc.) fall through
+            _ => {}
         }
     }
 
-    match key {
+    match (key, mods) {
+        // Shift+Enter → insert newline (multi-line input)
+        (KeyCode::Enter, m) if m.contains(KeyModifiers::SHIFT) => {
+            app.tui.input_insert('\n');
+        }
+
         // Submit
-        KeyCode::Enter => {
+        (KeyCode::Enter, _) => {
             if let Some(input) = app.tui.commit_input() {
                 submit_input(app, &input);
             }
         }
 
+        // Ctrl+Backspace → delete word
+        (KeyCode::Backspace, m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_delete_word_back();
+        }
+
+        // Ctrl+Left → move word left
+        (KeyCode::Left, m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_move_word_left();
+        }
+
+        // Ctrl+Right → move word right
+        (KeyCode::Right, m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_move_word_right();
+        }
+
         // Character input
-        KeyCode::Char(c) => {
+        (KeyCode::Char(c), _) => {
             app.tui.focus = Focus::Input;
             app.tui.input_insert(c);
         }
 
         // Editing
-        KeyCode::Backspace => {
+        (KeyCode::Backspace, _) => {
             app.tui.focus = Focus::Input;
             app.tui.input_delete_back();
         }
-        KeyCode::Left => {
+        (KeyCode::Left, _) => {
             app.tui.focus = Focus::Input;
             app.tui.input_move_left();
         }
-        KeyCode::Right => {
+        (KeyCode::Right, _) => {
             app.tui.focus = Focus::Input;
             app.tui.input_move_right();
         }
-        KeyCode::Home => match app.tui.focus {
+        (KeyCode::Home, _) => match app.tui.focus {
             Focus::Input => app.tui.input_home(),
             Focus::Sidebar => {
                 if !app.tui.workspace_files.is_empty() {
@@ -1370,10 +1381,16 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
                     refresh_tui_previews(app);
                 }
             }
-            Focus::ToolLog => app.tui.tool_scroll = 0,
-            Focus::Chat => app.tui.chat_scroll = 0,
+            Focus::ToolLog => {
+                app.tui.tool_follow = false;
+                app.tui.tool_scroll = 0;
+            }
+            Focus::Chat => {
+                app.tui.chat_follow = false;
+                app.tui.chat_scroll = 0;
+            }
         },
-        KeyCode::End => match app.tui.focus {
+        (KeyCode::End, _) => match app.tui.focus {
             Focus::Input => app.tui.input_end(),
             Focus::Sidebar => {
                 let len = app.tui.workspace_files.len();
@@ -1382,71 +1399,47 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
                     refresh_tui_previews(app);
                 }
             }
-            Focus::ToolLog => app.tui.tool_scroll = usize::MAX,
-            Focus::Chat => app.tui.chat_scroll = usize::MAX,
+            Focus::ToolLog => app.tui.follow_tool_log(),
+            Focus::Chat => app.tui.follow_chat(),
         },
 
-        // History
-        KeyCode::Up => {
-            match app.tui.focus {
-                Focus::Input => app.tui.history_prev(),
-                Focus::Sidebar => {
-                    let len = app.tui.workspace_files.len();
-                    if len > 0 {
-                        let cur = app.tui.file_list_state.selected().unwrap_or(0);
-                        app.tui.file_list_state.select(Some(cur.saturating_sub(1)));
-                        refresh_tui_previews(app);
-                    }
-                }
-                Focus::ToolLog => {
-                    app.tui.tool_scroll = app.tui.tool_scroll.saturating_sub(1);
-                }
-                Focus::Chat => {
-                    app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(1);
+        // History / scroll
+        (KeyCode::Up, _) => match app.tui.focus {
+            Focus::Input => app.tui.history_prev(),
+            Focus::Sidebar => {
+                let len = app.tui.workspace_files.len();
+                if len > 0 {
+                    let cur = app.tui.file_list_state.selected().unwrap_or(0);
+                    app.tui.file_list_state.select(Some(cur.saturating_sub(1)));
+                    refresh_tui_previews(app);
                 }
             }
-        }
-        KeyCode::Down => {
-            match app.tui.focus {
-                Focus::Input => app.tui.history_next(),
-                Focus::Sidebar => {
-                    let len = app.tui.workspace_files.len();
-                    if len > 0 {
-                        let cur = app.tui.file_list_state.selected().unwrap_or(0);
-                        app.tui.file_list_state.select(Some((cur + 1).min(len - 1)));
-                        refresh_tui_previews(app);
-                    }
-                }
-                Focus::ToolLog => {
-                    if app.tui.tool_scroll == usize::MAX {
-                        app.tui.tool_scroll = 0;
-                    }
-                    app.tui.tool_scroll += 1;
-                }
-                Focus::Chat => {
-                    app.tui.chat_scroll += 1;
+            Focus::ToolLog => app.tui.scroll_tool_by(-1),
+            Focus::Chat => app.tui.scroll_chat_by(-1),
+        },
+        (KeyCode::Down, _) => match app.tui.focus {
+            Focus::Input => app.tui.history_next(),
+            Focus::Sidebar => {
+                let len = app.tui.workspace_files.len();
+                if len > 0 {
+                    let cur = app.tui.file_list_state.selected().unwrap_or(0);
+                    app.tui.file_list_state.select(Some((cur + 1).min(len - 1)));
+                    refresh_tui_previews(app);
                 }
             }
-        }
+            Focus::ToolLog => app.tui.scroll_tool_by(1),
+            Focus::Chat => app.tui.scroll_chat_by(1),
+        },
 
-        // Page scroll for chat
-        KeyCode::PageUp => {
-            match app.tui.focus {
-                Focus::ToolLog => app.tui.tool_scroll = app.tui.tool_scroll.saturating_sub(10),
-                _ => app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(10),
-            }
-        }
-        KeyCode::PageDown => {
-            match app.tui.focus {
-                Focus::ToolLog => {
-                    if app.tui.tool_scroll == usize::MAX {
-                        app.tui.tool_scroll = 0;
-                    }
-                    app.tui.tool_scroll += 10;
-                }
-                _ => app.tui.chat_scroll += 10,
-            }
-        }
+        // Page scroll
+        (KeyCode::PageUp, _) => match app.tui.focus {
+            Focus::ToolLog => app.tui.scroll_tool_by(-10),
+            _ => app.tui.scroll_chat_by(-10),
+        },
+        (KeyCode::PageDown, _) => match app.tui.focus {
+            Focus::ToolLog => app.tui.scroll_tool_by(10),
+            _ => app.tui.scroll_chat_by(10),
+        },
 
         _ => {}
     }
@@ -1568,28 +1561,29 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
         MouseEventKind::ScrollUp => match app.tui.active_tab {
             ActiveTab::Chat => {
                 if app.tui.focus == Focus::ToolLog {
-                    app.tui.tool_scroll = app.tui.tool_scroll.saturating_sub(3);
+                    app.tui.scroll_tool_by(-3);
                 } else {
-                    app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(3);
+                    app.tui.scroll_chat_by(-3);
                 }
             }
             ActiveTab::Diff => {
                 app.tui.diff_scroll = app.tui.diff_scroll.saturating_sub(3);
+            }
+            ActiveTab::ActionQueue => {
+                app.tui.action_preview_scroll = app.tui.action_preview_scroll.saturating_sub(3);
             }
             _ => {}
         },
         MouseEventKind::ScrollDown => match app.tui.active_tab {
             ActiveTab::Chat => {
                 if app.tui.focus == Focus::ToolLog {
-                    if app.tui.tool_scroll == usize::MAX {
-                        app.tui.tool_scroll = 0;
-                    }
-                    app.tui.tool_scroll += 3;
+                    app.tui.scroll_tool_by(3);
                 } else {
-                    app.tui.chat_scroll += 3;
+                    app.tui.scroll_chat_by(3);
                 }
             }
             ActiveTab::Diff => app.tui.diff_scroll += 3,
+            ActiveTab::ActionQueue => app.tui.action_preview_scroll += 3,
             _ => {}
         },
         _ => {}
@@ -1600,6 +1594,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
 // Command dispatch
 // ─────────────────────────────────────────────────────────────────────────────
 fn submit_input(app: &mut App, input: &str) {
+    app.tui.follow_chat();
     app.tui.add_message(ChatMessage::user(input));
     let _ = app.session_store.append(&app.session_id, &SessionEvent::user(input));
     refresh_tui_metadata(app);
