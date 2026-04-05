@@ -533,9 +533,9 @@ impl App {
                         .add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
                 }
                 SessionEvent::ToolResult { name, result, .. } => {
-                    let entry = summarize_tool_result(&name, &result);
-                    self.tui.tool_log.push(entry.clone());
-                    self.tui.add_message(ChatMessage::tool_result(entry));
+                        let entry = summarize_tool_result(&name, &result);
+                        self.tui.add_tool_log_entry(entry.clone());
+                        self.tui.add_message(ChatMessage::tool_result(entry));
                 }
                 SessionEvent::EditApplied { file, patch, .. } => {
                     // Just show as system message for historical load
@@ -755,14 +755,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::ToolCall { name, args } => {
                         app.tui.current_tool = Some(name.clone());
                         let entry = summarize_tool_call(&name, &args);
-                        app.tui.tool_log.push(entry.clone());
+                        app.tui.add_tool_log_entry(entry.clone());
                         app.tui.add_message(ChatMessage::tool_call(&entry));
                         let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_call(&name, args.clone()));
                     }
                     OrchestratorEvent::ToolResult { name, result } => {
                         app.tui.current_tool = None;
                         let entry = summarize_tool_result(&name, &result);
-                        app.tui.tool_log.push(entry.clone());
+                        app.tui.add_tool_log_entry(entry.clone());
                         app.tui.add_message(ChatMessage::tool_result(&entry));
                         let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_result(&name, result));
                     }
@@ -772,7 +772,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                         if app.skip_permissions {
                             // Auto-approve immediately
                             let _ = tx.send(true);
-                            app.tui.tool_log.push(format!("Auto-approved: {} (skip_permissions)", name));
+                            app.tui
+                                .add_tool_log_entry(format!("Auto-approved: {} (skip_permissions)", name));
                         } else {
                             app.tui.is_thinking = false;
                             queued_permissions.push((name, args, reason, tx));
@@ -1041,14 +1042,20 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
         }
         KeyCode::Home => match app.tui.focus {
             Focus::Input => app.tui.input_home(),
-            Focus::Chat => app.tui.chat_scroll = 0,
-            Focus::ToolLog => app.tui.tool_scroll = 0,
+            Focus::Chat => {
+                app.tui.chat_follow = false;
+                app.tui.chat_scroll = 0;
+            }
+            Focus::ToolLog => {
+                app.tui.tool_follow = false;
+                app.tui.tool_scroll = 0;
+            }
             Focus::Sidebar => app.tui.file_list_state.select(Some(0)),
         },
         KeyCode::End => match app.tui.focus {
             Focus::Input => app.tui.input_end(),
-            Focus::Chat => app.tui.chat_scroll = usize::MAX,
-            Focus::ToolLog => app.tui.tool_scroll = usize::MAX,
+            Focus::Chat => app.tui.follow_chat(),
+            Focus::ToolLog => app.tui.follow_tool_log(),
             Focus::Sidebar => {
                 if !app.tui.workspace_files.is_empty() {
                     app.tui
@@ -1061,8 +1068,8 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
         // History
         KeyCode::Up => match app.tui.focus {
             Focus::Input => app.tui.history_prev(),
-            Focus::Chat => app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(1),
-            Focus::ToolLog => app.tui.tool_scroll = app.tui.tool_scroll.saturating_sub(1),
+            Focus::Chat => app.tui.scroll_chat_by(-1),
+            Focus::ToolLog => app.tui.scroll_tool_by(-1),
             Focus::Sidebar => move_sidebar_selection(
                 &mut app.tui.file_list_state,
                 app.tui.workspace_files.len(),
@@ -1071,8 +1078,8 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
         },
         KeyCode::Down => match app.tui.focus {
             Focus::Input => app.tui.history_next(),
-            Focus::Chat => app.tui.chat_scroll += 1,
-            Focus::ToolLog => app.tui.tool_scroll += 1,
+            Focus::Chat => app.tui.scroll_chat_by(1),
+            Focus::ToolLog => app.tui.scroll_tool_by(1),
             Focus::Sidebar => move_sidebar_selection(
                 &mut app.tui.file_list_state,
                 app.tui.workspace_files.len(),
@@ -1083,14 +1090,14 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
         // Page scroll for chat
         KeyCode::PageUp => {
             match app.tui.focus {
-                Focus::ToolLog => app.tui.tool_scroll = app.tui.tool_scroll.saturating_sub(10),
-                _ => app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(10),
+                Focus::ToolLog => app.tui.scroll_tool_by(-10),
+                _ => app.tui.scroll_chat_by(-10),
             }
         }
         KeyCode::PageDown => {
             match app.tui.focus {
-                Focus::ToolLog => app.tui.tool_scroll += 10,
-                _ => app.tui.chat_scroll += 10,
+                Focus::ToolLog => app.tui.scroll_tool_by(10),
+                _ => app.tui.scroll_chat_by(10),
             }
         }
 
@@ -1154,7 +1161,7 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                             }
                             SessionEvent::ToolResult { name, result, .. } => {
                                 let entry = summarize_tool_result(&name, &result);
-                                app.tui.tool_log.push(entry.clone());
+                                app.tui.add_tool_log_entry(entry.clone());
                                 app.tui.add_message(ChatMessage::tool_result(entry));
                             }
                             SessionEvent::EditApplied { file, patch, .. } => {
@@ -1229,7 +1236,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollUp => match app.tui.active_tab {
             ActiveTab::Chat => {
-                app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(3);
+                app.tui.scroll_chat_by(-3);
             }
             ActiveTab::Diff => {
                 app.tui.diff_scroll = app.tui.diff_scroll.saturating_sub(3);
@@ -1237,7 +1244,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
             _ => {}
         },
         MouseEventKind::ScrollDown => match app.tui.active_tab {
-            ActiveTab::Chat => app.tui.chat_scroll += 3,
+            ActiveTab::Chat => app.tui.scroll_chat_by(3),
             ActiveTab::Diff => app.tui.diff_scroll += 3,
             _ => {}
         },
@@ -1278,6 +1285,7 @@ fn move_sidebar_selection(state: &mut ratatui::widgets::ListState, len: usize, d
 // Command dispatch
 // ─────────────────────────────────────────────────────────────────────────────
 fn submit_input(app: &mut App, input: &str) {
+    app.tui.follow_chat();
     app.tui.add_message(ChatMessage::user(input));
     let _ = app.session_store.append(&app.session_id, &SessionEvent::user(input));
 

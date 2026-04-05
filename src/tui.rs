@@ -251,6 +251,8 @@ pub struct TuiState {
     pub focus: Focus,
     pub messages: Vec<ChatMessage>,
     pub chat_scroll: usize,
+    pub chat_follow: bool,
+    pub chat_resolved_scroll: usize,
     pub input: String,
     pub input_cursor: usize,
     pub input_history: Vec<String>,
@@ -261,6 +263,8 @@ pub struct TuiState {
     pub sidebar_visible: bool,
     pub tool_log: Vec<String>,
     pub tool_scroll: usize,
+    pub tool_follow: bool,
+    pub tool_resolved_scroll: usize,
     pub current_tool: Option<String>,
     pub barq_context: Vec<String>,
     pub diff_content: Vec<String>,
@@ -298,6 +302,8 @@ impl TuiState {
                 "Welcome to BarqCoder. Type a prompt or /help to see commands.",
             )],
             chat_scroll: usize::MAX,
+            chat_follow: true,
+            chat_resolved_scroll: 0,
             input: String::new(),
             input_cursor: 0,
             input_history: Vec::new(),
@@ -308,6 +314,8 @@ impl TuiState {
             sidebar_visible: true,
             tool_log: Vec::new(),
             tool_scroll: usize::MAX,
+            tool_follow: true,
+            tool_resolved_scroll: 0,
             current_tool: None,
             barq_context: Vec::new(),
             diff_content: Vec::new(),
@@ -333,7 +341,9 @@ impl TuiState {
 
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
-        self.chat_scroll = usize::MAX;
+        if self.chat_follow {
+            self.chat_scroll = usize::MAX;
+        }
     }
 
     pub fn append_agent_token(&mut self, token: &str) {
@@ -341,13 +351,22 @@ impl TuiState {
             Some(last) if matches!(last.kind, MessageKind::Agent) => last.content.push_str(token),
             _ => self.messages.push(ChatMessage::agent(token)),
         }
-        self.chat_scroll = usize::MAX;
+        if self.chat_follow {
+            self.chat_scroll = usize::MAX;
+        }
     }
 
     pub fn set_diff(&mut self, patch: &str) {
         self.diff_content = patch.lines().map(|line| line.to_string()).collect();
         self.diff_scroll = 0;
         self.active_tab = ActiveTab::Diff;
+    }
+
+    pub fn add_tool_log_entry(&mut self, entry: impl Into<String>) {
+        self.tool_log.push(entry.into());
+        if self.tool_follow {
+            self.tool_scroll = usize::MAX;
+        }
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
@@ -461,6 +480,44 @@ impl TuiState {
             (Focus::ToolLog, false) => Focus::Input,
             (Focus::Sidebar, _) => Focus::Input,
         };
+    }
+
+    pub fn follow_chat(&mut self) {
+        self.chat_follow = true;
+        self.chat_scroll = usize::MAX;
+    }
+
+    pub fn scroll_chat_by(&mut self, delta: isize) {
+        let base = if self.chat_follow {
+            self.chat_resolved_scroll
+        } else {
+            self.chat_scroll
+        };
+        self.chat_follow = false;
+        self.chat_scroll = apply_scroll_delta(base, delta);
+    }
+
+    pub fn follow_tool_log(&mut self) {
+        self.tool_follow = true;
+        self.tool_scroll = usize::MAX;
+    }
+
+    pub fn scroll_tool_by(&mut self, delta: isize) {
+        let base = if self.tool_follow {
+            self.tool_resolved_scroll
+        } else {
+            self.tool_scroll
+        };
+        self.tool_follow = false;
+        self.tool_scroll = apply_scroll_delta(base, delta);
+    }
+
+    pub fn latest_user_prompt_preview(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.kind, MessageKind::User))
+            .map(|message| preview_multiline(&message.content, 3, 180))
     }
 
     pub fn slash_commands() -> &'static [(&'static str, &'static str)] {
@@ -693,6 +750,44 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
 }
 
 fn draw_chat_history(f: &mut Frame, area: Rect, state: &mut TuiState) {
+    let sticky_prompt = if !state.chat_follow {
+        state.latest_user_prompt_preview()
+    } else {
+        None
+    };
+
+    let transcript_area = if let Some(prompt) = sticky_prompt {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Min(0)])
+            .split(area);
+
+        let ribbon = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Prompt Context",
+                Style::default()
+                    .fg(Palette::BRAND)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                prompt,
+                Style::default().fg(Palette::TEXT_DIM),
+            )),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Palette::PANEL_MUTED))
+                .style(Style::default().bg(Palette::PANEL_ALT))
+                .padding(Padding::horizontal(1)),
+        )
+        .wrap(Wrap { trim: true });
+        f.render_widget(ribbon, rows[0]);
+        rows[1]
+    } else {
+        area
+    };
+
     let mut lines = Vec::new();
 
     for message in &state.messages {
@@ -735,12 +830,18 @@ fn draw_chat_history(f: &mut Frame, area: Rect, state: &mut TuiState) {
         ]));
     }
 
-    render_lines_panel(
+    let conversation_title = if state.chat_follow {
+        "Conversation"
+    } else {
+        "Conversation / History"
+    };
+
+    state.chat_resolved_scroll = render_lines_panel(
         f,
-        area,
+        transcript_area,
         lines,
         &mut state.chat_scroll,
-        panel_block("Conversation", state.focus == Focus::Chat),
+        panel_block(conversation_title, state.focus == Focus::Chat),
     );
 }
 
@@ -766,12 +867,18 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
         }
     }
 
-    render_lines_panel(
+    let tool_title = if state.tool_follow {
+        "Tool Activity"
+    } else {
+        "Tool Activity / History"
+    };
+
+    state.tool_resolved_scroll = render_lines_panel(
         f,
         area,
         lines,
         &mut state.tool_scroll,
-        panel_block("Tool Activity", state.focus == Focus::ToolLog),
+        panel_block(tool_title, state.focus == Focus::ToolLog),
     );
 }
 
@@ -1083,7 +1190,7 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
 fn draw_footer(f: &mut Frame, area: Rect, state: &TuiState) {
     let content = match state.active_tab {
-        ActiveTab::Chat => "Type or paste prompt  Enter send  F1 cycle panes  Up/Down or PgUp/PgDn use focused pane  Tab switch tabs  Esc quit",
+        ActiveTab::Chat => "Type or paste prompt  Enter send  F1 cycle panes  Up/Down or PgUp/PgDn scroll focused pane  End resume live view  Tab switch tabs  Esc quit",
         ActiveTab::Diff => "Up/Down scroll  PageUp/PageDown fast scroll  Home/End jump  Tab switch tabs  Esc quit",
         ActiveTab::Sessions => "Up/Down select  Enter replay session  Tab switch tabs  Esc quit",
         ActiveTab::ActionQueue => "Up/Down select  PageUp/PageDown preview scroll  Y approve once  A allow this tool  N deny  Esc deny all or quit",
@@ -1149,7 +1256,7 @@ fn render_lines_panel(
     lines: Vec<Line>,
     scroll_state: &mut usize,
     block: Block<'_>,
-) {
+) -> usize {
     let total = lines.len();
     let visible = area.height.saturating_sub(2) as usize;
     let scroll = resolve_scroll(*scroll_state, total, visible);
@@ -1172,6 +1279,8 @@ fn render_lines_panel(
             &mut scrollbar_state,
         );
     }
+
+    scroll
 }
 
 fn resolve_scroll(requested: usize, total_lines: usize, visible_lines: usize) -> usize {
@@ -1198,6 +1307,33 @@ fn trim_chars(text: &str, max_chars: usize) -> String {
     }
     trimmed.push('…');
     trimmed
+}
+
+fn preview_multiline(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut preview = String::new();
+    let mut used_lines = 0usize;
+
+    for line in text.lines() {
+        if used_lines == max_lines || preview.chars().count() >= max_chars {
+            break;
+        }
+        if !preview.is_empty() {
+            preview.push(' ');
+        }
+        preview.push_str(line.trim());
+        used_lines += 1;
+    }
+
+    let collapsed = preview.split_whitespace().collect::<Vec<_>>().join(" ");
+    trim_chars(&collapsed, max_chars)
+}
+
+fn apply_scroll_delta(base: usize, delta: isize) -> usize {
+    if delta.is_negative() {
+        base.saturating_sub(delta.unsigned_abs())
+    } else {
+        base.saturating_add(delta as usize)
+    }
 }
 
 fn build_composer_lines(
@@ -1291,7 +1427,7 @@ fn status_label(state: &TuiState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_composer_lines, Focus, TuiState};
+    use super::{apply_scroll_delta, build_composer_lines, Focus, TuiState};
 
     #[test]
     fn input_insert_str_normalizes_pasted_newlines() {
@@ -1325,6 +1461,48 @@ mod tests {
         assert_eq!(rendered.len(), 3);
         assert!(rendered[0].starts_with("... "));
         assert!(rendered.iter().any(|line| line.contains("line5|")));
+    }
+
+    #[test]
+    fn scroll_chat_exits_follow_mode_from_last_resolved_position() {
+        let mut state = TuiState::new(4096, "model".to_string(), "session".to_string());
+        state.chat_follow = true;
+        state.chat_resolved_scroll = 18;
+
+        state.scroll_chat_by(-2);
+
+        assert!(!state.chat_follow);
+        assert_eq!(state.chat_scroll, 16);
+    }
+
+    #[test]
+    fn add_message_preserves_manual_chat_position() {
+        let mut state = TuiState::new(4096, "model".to_string(), "session".to_string());
+        state.chat_follow = false;
+        state.chat_scroll = 7;
+
+        state.add_message(super::ChatMessage::agent("new reply"));
+
+        assert_eq!(state.chat_scroll, 7);
+    }
+
+    #[test]
+    fn latest_user_prompt_preview_uses_most_recent_user_message() {
+        let mut state = TuiState::new(4096, "model".to_string(), "session".to_string());
+        state.add_message(super::ChatMessage::user("first prompt"));
+        state.add_message(super::ChatMessage::agent("answer"));
+        state.add_message(super::ChatMessage::user("second prompt\nwith detail"));
+
+        assert_eq!(
+            state.latest_user_prompt_preview().as_deref(),
+            Some("second prompt with detail")
+        );
+    }
+
+    #[test]
+    fn apply_scroll_delta_saturates_at_zero() {
+        assert_eq!(apply_scroll_delta(2, -5), 0);
+        assert_eq!(apply_scroll_delta(2, 5), 7);
     }
 }
 
