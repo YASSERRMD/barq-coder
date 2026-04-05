@@ -788,46 +788,14 @@ fn draw_chat_history(f: &mut Frame, area: Rect, state: &mut TuiState) {
         area
     };
 
-    let mut lines = Vec::new();
-
-    for message in &state.messages {
-        let (label, label_color, body_color) = match message.kind {
-            MessageKind::User => ("You", Palette::USER, Palette::TEXT),
-            MessageKind::Agent => ("Barq", Palette::AGENT, Palette::TEXT),
-            MessageKind::ToolCall => ("Tool", Palette::TOOL, Palette::TOOL),
-            MessageKind::ToolResult => ("Result", Palette::RESULT, Palette::RESULT),
-            MessageKind::System => ("Note", Palette::TEXT_DIM, Palette::TEXT_DIM),
-            MessageKind::Error => ("Error", Palette::ERROR, Palette::ERROR),
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("[{}] ", label),
-                Style::default().fg(label_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                trim_chars(message.content.lines().next().unwrap_or(""), 120),
-                Style::default().fg(body_color),
-            ),
-        ]));
-
-        for line in message.content.lines().skip(1) {
-            lines.push(Line::from(Span::styled(
-                format!("      {}", line),
-                Style::default().fg(body_color),
-            )));
-        }
-        lines.push(Line::raw(""));
-    }
-
+    let content_width = transcript_area.width.saturating_sub(5) as usize;
+    let mut lines = build_transcript_lines(&state.messages, content_width.max(16));
     if state.is_thinking {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("[{}] ", spinner_frame(state.tick)),
-                Style::default().fg(Palette::BRAND).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Working...", Style::default().fg(Palette::TEXT_DIM)),
-        ]));
+        push_message_card(
+            &mut lines,
+            &ChatMessage::system(format!("{} Working...", spinner_frame(state.tick))),
+            content_width.max(16),
+        );
     }
 
     let conversation_title = if state.chat_follow {
@@ -850,7 +818,8 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
     if let Some(tool) = &state.current_tool {
         lines.push(Line::from(vec![
-            Span::styled("Active ", Style::default().fg(Palette::WARNING).add_modifier(Modifier::BOLD)),
+            Span::styled("Active", Style::default().fg(Palette::WARNING).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
             Span::styled(tool.as_str(), Style::default().fg(Palette::TEXT)),
         ]));
         lines.push(Line::raw(""));
@@ -863,7 +832,17 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
         )));
     } else {
         for entry in &state.tool_log {
-            lines.push(Line::from(Span::styled(entry.as_str(), Style::default().fg(Palette::TEXT))));
+            for (idx, line) in wrap_message_body(entry, area.width.saturating_sub(6) as usize)
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = if idx == 0 { "- " } else { "  " };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(Palette::KEY)),
+                    Span::styled(line, Style::default().fg(Palette::TEXT)),
+                ]));
+            }
+            lines.push(Line::raw(""));
         }
     }
 
@@ -1296,6 +1275,61 @@ fn resolve_scroll(requested: usize, total_lines: usize, visible_lines: usize) ->
     }
 }
 
+fn build_transcript_lines(messages: &[ChatMessage], max_width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for message in messages {
+        push_message_card(&mut lines, message, max_width);
+    }
+    lines
+}
+
+fn push_message_card(lines: &mut Vec<Line<'static>>, message: &ChatMessage, max_width: usize) {
+    let (marker, title, accent, body_color) = match message.kind {
+        MessageKind::User => (">", "Prompt", Palette::USER, Palette::TEXT),
+        MessageKind::Agent => ("<", "Barq", Palette::AGENT, Palette::TEXT),
+        MessageKind::ToolCall => ("*", "Tool Request", Palette::TOOL, Palette::TEXT),
+        MessageKind::ToolResult => ("=", "Tool Result", Palette::RESULT, Palette::TEXT),
+        MessageKind::System => ("-", "Session Note", Palette::TEXT_DIM, Palette::TEXT_DIM),
+        MessageKind::Error => ("!", "Error", Palette::ERROR, Palette::ERROR),
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{} {}", marker, title),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    for body_line in wrap_message_body(&message.content, max_width.saturating_sub(2).max(1)) {
+        lines.push(Line::from(vec![
+            Span::styled("| ", Style::default().fg(accent)),
+            Span::styled(body_line, Style::default().fg(body_color)),
+        ]));
+    }
+
+    lines.push(Line::raw(""));
+}
+
+fn wrap_message_body(text: &str, max_width: usize) -> Vec<String> {
+    let mut wrapped = Vec::new();
+    let width = max_width.max(1);
+
+    for logical_line in text.lines() {
+        if logical_line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+
+        wrapped.extend(wrap_visual_line(logical_line, width));
+    }
+
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+
+    wrapped
+}
+
 fn trim_chars(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -1427,7 +1461,7 @@ fn status_label(state: &TuiState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_scroll_delta, build_composer_lines, Focus, TuiState};
+    use super::{apply_scroll_delta, build_composer_lines, build_transcript_lines, ChatMessage, Focus, TuiState};
 
     #[test]
     fn input_insert_str_normalizes_pasted_newlines() {
@@ -1503,6 +1537,23 @@ mod tests {
     fn apply_scroll_delta_saturates_at_zero() {
         assert_eq!(apply_scroll_delta(2, -5), 0);
         assert_eq!(apply_scroll_delta(2, 5), 7);
+    }
+
+    #[test]
+    fn transcript_lines_render_message_cards_instead_of_flat_tags() {
+        let lines = build_transcript_lines(
+            &[
+                ChatMessage::user("Fix the failing tests"),
+                ChatMessage::tool_call("Run shell command\n  command: cargo test"),
+            ],
+            48,
+        );
+        let rendered: Vec<String> = lines.into_iter().map(|line| line.to_string()).collect();
+
+        assert!(rendered.iter().any(|line| line.contains("> Prompt")));
+        assert!(rendered.iter().any(|line| line.contains("| Fix the failing tests")));
+        assert!(rendered.iter().any(|line| line.contains("* Tool Request")));
+        assert!(rendered.iter().any(|line| line.contains("| Run shell command")));
     }
 }
 

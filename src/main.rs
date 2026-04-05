@@ -106,6 +106,88 @@ fn content_stats(label: &str, text: Option<&str>) -> Option<String> {
     ))
 }
 
+fn compact_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn summarize_value(label: &str, value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "none".to_string(),
+        serde_json::Value::Bool(v) => {
+            if *v {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            }
+        }
+        serde_json::Value::Number(v) => v.to_string(),
+        serde_json::Value::String(text) => {
+            if label.contains("content")
+                || label.contains("patch")
+                || label.contains("prompt")
+                || text.contains('\n')
+                || text.chars().count() > TOOL_SUMMARY_MAX_CHARS / 2
+            {
+                format!(
+                    "{} lines / {} chars",
+                    text.lines().count().max(1),
+                    text.chars().count()
+                )
+            } else {
+                truncate_inline(&compact_whitespace(text), TOOL_SUMMARY_MAX_CHARS)
+            }
+        }
+        serde_json::Value::Array(items) => {
+            if items.is_empty() {
+                "0 items".to_string()
+            } else if items.len() <= 3
+                && items.iter().all(|item| {
+                    matches!(
+                        item,
+                        serde_json::Value::String(_)
+                            | serde_json::Value::Number(_)
+                            | serde_json::Value::Bool(_)
+                    )
+                })
+            {
+                let joined = items
+                    .iter()
+                    .map(|item| summarize_value(label, item))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                truncate_inline(&joined, TOOL_SUMMARY_MAX_CHARS)
+            } else {
+                format!("{} items", items.len())
+            }
+        }
+        serde_json::Value::Object(fields) => format!("{} fields", fields.len()),
+    }
+}
+
+fn summarize_fields(value: &serde_json::Value, max_fields: usize) -> Vec<String> {
+    let Some(fields) = value.as_object() else {
+        return vec![format!("value: {}", summarize_value("value", value))];
+    };
+
+    let mut lines = Vec::new();
+    for (idx, (key, value)) in fields.iter().enumerate() {
+        if idx >= max_fields {
+            lines.push(format!("... {} more fields", fields.len().saturating_sub(max_fields)));
+            break;
+        }
+        lines.push(format!("{}: {}", key, summarize_value(key, value)));
+    }
+    lines
+}
+
+fn format_tool_summary(title: impl Into<String>, details: Vec<String>) -> String {
+    let mut lines = vec![title.into()];
+    for detail in details {
+        lines.push(format!("  {}", detail));
+    }
+    lines.join("\n")
+}
+
 fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
     match name {
         "edit_file" => {
@@ -130,21 +212,27 @@ fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
                 bits.join(", ")
             };
 
-            if detail.is_empty() {
-                format!("Calling edit_file on {}", path)
-            } else {
-                format!("Calling edit_file on {} ({})", path, detail)
+            let mut details = vec![format!("path: {}", path)];
+            if !detail.is_empty() {
+                details.push(detail);
             }
+            format_tool_summary("Edit file", details)
         }
         "create_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
             let detail = content_stats("content", args.get("content").and_then(|v| v.as_str()))
                 .unwrap_or_else(|| "content unavailable".to_string());
-            format!("Calling create_file for {} ({})", path, detail)
+            format_tool_summary("Create file", vec![format!("path: {}", path), detail])
         }
         "shell_exec" => {
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("<unknown>");
-            format!("Calling shell_exec: {}", truncate_inline(command, TOOL_SUMMARY_MAX_CHARS))
+            format_tool_summary(
+                "Run shell command",
+                vec![format!(
+                    "command: {}",
+                    truncate_inline(command, TOOL_SUMMARY_MAX_CHARS)
+                )],
+            )
         }
         "git_ops" => {
             let operation = args.get("operation").and_then(|v| v.as_str()).unwrap_or("status");
@@ -154,22 +242,27 @@ fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
             } else {
                 format!("git {} {}", operation, extra.trim())
             };
-            format!("Calling git_ops: {}", truncate_inline(&command, TOOL_SUMMARY_MAX_CHARS))
-        }
-        _ => {
-            let pretty = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
-            format!(
-                "Calling {} with {}",
-                name,
-                truncate_inline(&pretty, TOOL_SUMMARY_MAX_CHARS)
+            format_tool_summary(
+                "Run git command",
+                vec![format!(
+                    "command: {}",
+                    truncate_inline(&command, TOOL_SUMMARY_MAX_CHARS)
+                )],
             )
         }
+        _ => format_tool_summary(format!("Use tool {}", name), summarize_fields(args, 5)),
     }
 }
 
 fn summarize_tool_result(name: &str, result: &serde_json::Value) -> String {
     if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
-        return format!("{} failed: {}", name, truncate_inline(error, TOOL_SUMMARY_MAX_CHARS));
+        return format_tool_summary(
+            format!("{} failed", name),
+            vec![format!(
+                "error: {}",
+                truncate_inline(error, TOOL_SUMMARY_MAX_CHARS)
+            )],
+        );
     }
 
     match name {
@@ -178,44 +271,51 @@ fn summarize_tool_result(name: &str, result: &serde_json::Value) -> String {
             let preview = result.get("preview").and_then(|v| v.as_bool()).unwrap_or(false);
             let reverted = result.get("reverted").and_then(|v| v.as_bool()).unwrap_or(false);
             if preview {
-                "edit_file preview generated".to_string()
+                format_tool_summary("Edit preview generated", Vec::new())
             } else if applied && reverted {
-                "edit_file applied then reverted".to_string()
+                format_tool_summary("Edit applied then reverted", Vec::new())
             } else if applied {
-                "edit_file applied".to_string()
+                format_tool_summary("Edit applied", Vec::new())
             } else {
-                "edit_file completed".to_string()
+                format_tool_summary("Edit completed", Vec::new())
             }
         }
         "create_file" => {
             let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
             if result.get("created").and_then(|v| v.as_bool()).unwrap_or(false) {
-                format!("Created {}", path)
+                format_tool_summary("File created", vec![format!("path: {}", path)])
             } else {
-                format!("create_file completed for {}", path)
+                format_tool_summary("File creation finished", vec![format!("path: {}", path)])
             }
         }
         "shell_exec" => {
             let exit_code = result.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
             let timed_out = result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut details = vec![format!("exit code: {}", exit_code)];
             if timed_out {
-                format!("shell_exec timed out (exit {})", exit_code)
-            } else {
-                format!("shell_exec exited with {}", exit_code)
+                details.push("timed out: yes".to_string());
             }
+            if let Some(stdout) = content_stats("stdout", result.get("stdout").and_then(|v| v.as_str())) {
+                if stdout != "stdout: 1 lines / 0 chars" {
+                    details.push(stdout);
+                }
+            }
+            if let Some(stderr) = content_stats("stderr", result.get("stderr").and_then(|v| v.as_str())) {
+                if stderr != "stderr: 1 lines / 0 chars" {
+                    details.push(stderr);
+                }
+            }
+            format_tool_summary("Shell command finished", details)
         }
         "git_ops" => {
             let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
             if success {
-                "git_ops completed".to_string()
+                format_tool_summary("Git command finished", Vec::new())
             } else {
-                "git_ops reported an error".to_string()
+                format_tool_summary("Git command reported an error", summarize_fields(result, 4))
             }
         }
-        _ => {
-            let pretty = serde_json::to_string(result).unwrap_or_else(|_| "{}".to_string());
-            format!("{} result: {}", name, truncate_inline(&pretty, TOOL_SUMMARY_MAX_CHARS))
-        }
+        _ => format_tool_summary(format!("{} finished", name), summarize_fields(result, 5)),
     }
 }
 
@@ -1439,7 +1539,8 @@ mod tests {
             }),
         );
 
-        assert!(summary.contains("Calling create_file for src/generated.rs"));
+        assert!(summary.contains("Create file"));
+        assert!(summary.contains("path: src/generated.rs"));
         assert!(summary.contains("80 lines"));
         assert!(!summary.contains("fn main() {}"));
     }
@@ -1456,7 +1557,25 @@ mod tests {
             }),
         );
 
-        assert_eq!(summary, "shell_exec exited with 0");
+        assert!(summary.contains("Shell command finished"));
+        assert!(summary.contains("exit code: 0"));
+    }
+
+    #[test]
+    fn summarize_unknown_tool_does_not_fall_back_to_json_blob() {
+        let summary = summarize_tool_call(
+            "custom_tool",
+            &json!({
+                "query": "explain the failing tests",
+                "paths": ["src/main.rs", "src/tui.rs"],
+                "options": { "depth": 2 }
+            }),
+        );
+
+        assert!(summary.contains("Use tool custom_tool"));
+        assert!(summary.contains("query:"));
+        assert!(summary.contains("paths:"));
+        assert!(!summary.contains("{\"query\""));
     }
 }
 
