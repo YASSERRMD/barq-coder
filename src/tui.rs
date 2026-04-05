@@ -139,7 +139,6 @@ pub enum ActionKind {
     WriteFile {
         path: String,
         patch: String,
-        full_content: String,
     },
     /// Run a shell command (requires explicit user approval).
     ShellCommand { command: String, reason: String },
@@ -155,8 +154,8 @@ pub struct PendingAction {
 }
 
 impl PendingAction {
-    pub fn write_file(path: impl Into<String>, patch: impl Into<String>, full_content: impl Into<String>, agent: impl Into<String>) -> Self {
-        Self { kind: ActionKind::WriteFile { path: path.into(), patch: patch.into(), full_content: full_content.into() }, agent: agent.into(), approved: None }
+    pub fn write_file(path: impl Into<String>, patch: impl Into<String>, agent: impl Into<String>) -> Self {
+        Self { kind: ActionKind::WriteFile { path: path.into(), patch: patch.into() }, agent: agent.into(), approved: None }
     }
 
     pub fn shell_cmd(command: impl Into<String>, reason: impl Into<String>, agent: impl Into<String>) -> Self {
@@ -182,6 +181,14 @@ impl PendingAction {
             ActionKind::ApplyVerifiedPatch { patch, .. } => patch,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct PermissionPrompt {
+    pub title: String,
+    pub reason: String,
+    pub hint: String,
+    pub queue_len: usize,
 }
 
 // ─────────────────────────────────────────────
@@ -238,6 +245,7 @@ pub struct TuiState {
     pub action_queue: Vec<PendingAction>,
     pub action_queue_selected: usize,
     pub action_preview_scroll: usize,
+    pub permission_prompt: Option<PermissionPrompt>,
 
     // Sessions
     pub sessions: Vec<SessionEntry>,
@@ -291,6 +299,7 @@ impl TuiState {
             action_queue: Vec::new(),
             action_queue_selected: 0,
             action_preview_scroll: 0,
+            permission_prompt: None,
             sessions: Vec::new(),
             session_list_state: {
                 let mut s = ListState::default();
@@ -525,6 +534,10 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
     draw_header(f, outer[0], state);
     draw_body(f, outer[1], state);
     draw_keys(f, outer[2], state);
+
+    if let Some(prompt) = &state.permission_prompt {
+        draw_permission_prompt(f, prompt);
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -1603,6 +1616,49 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     f.render_widget(preview, chunks[1]);
 }
 
+fn draw_permission_prompt(f: &mut Frame, prompt: &PermissionPrompt) {
+    let area = centered_rect(70, 11, f.area());
+    let text = vec![
+        Line::from(Span::styled(
+            prompt.title.as_str(),
+            Style::default()
+                .fg(Palette::TEXT_BRIGHT)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            prompt.reason.as_str(),
+            Style::default().fg(Palette::TEXT),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            prompt.hint.as_str(),
+            Style::default().fg(Palette::WARN_MSG).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("Queued approvals: {}", prompt.queue_len),
+            Style::default().fg(Palette::TEXT_DIM),
+        )),
+    ];
+
+    let widget = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title(" Permission Required ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(Palette::BORDER_ACTIVE))
+                .style(Style::default().bg(Palette::SURFACE2))
+                .padding(Padding::horizontal(1)),
+        )
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(Clear, area);
+    f.render_widget(widget, area);
+}
+
 // ─────────────────────────────────────────────
 // Keybindings bar
 // ─────────────────────────────────────────────
@@ -1632,6 +1688,7 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
             ("↑/↓", "Select"),
             ("PgUp/Dn", "Scroll Preview"),
             ("Y", "Approve"),
+            ("A", "Remember"),
             ("N", "Reject"),
             ("Tab", "Next Tab"),
             ("Esc", "Quit"),
@@ -1677,5 +1734,18 @@ fn format_timestamp(ts: u64) -> String {
         format!("{}h ago", diff / 3600)
     } else {
         format!("{}d ago", diff / 86400)
+    }
+}
+
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let width = area.width.saturating_mul(percent_x).saturating_div(100);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+
+    Rect {
+        x,
+        y,
+        width,
+        height: height.min(area.height),
     }
 }
