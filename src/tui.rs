@@ -49,6 +49,14 @@ pub fn spinner_frame(tick: usize) -> &'static str {
     SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
 }
 
+const BOUNCE_FRAMES: &[&str] = &[
+    "●∙∙∙∙", "∙●∙∙∙", "∙∙●∙∙", "∙∙∙●∙", "∙∙∙∙●", "∙∙∙●∙", "∙∙●∙∙", "∙●∙∙∙",
+];
+
+pub fn bounce_frame(tick: usize) -> &'static str {
+    BOUNCE_FRAMES[tick % BOUNCE_FRAMES.len()]
+}
+
 // ─────────────────────────────────────────────
 // Tab enum
 // ─────────────────────────────────────────────
@@ -240,6 +248,10 @@ pub struct TuiState {
     pub sessions: Vec<SessionEntry>,
     pub session_list_state: ListState,
 
+    // Scroll follow mode
+    pub chat_follow: bool,
+    pub tool_follow: bool,
+
     // Status
     pub is_thinking: bool,
     pub is_indexing: bool,
@@ -278,6 +290,8 @@ impl TuiState {
             tool_scroll: 0,
             current_tool: None,
             barq_context: Vec::new(),
+            chat_follow: true,
+            tool_follow: true,
             diff_content: Vec::new(),
             diff_scroll: 0,
             action_queue: Vec::new(),
@@ -304,8 +318,9 @@ impl TuiState {
 
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
-        // auto-scroll to bottom
-        self.chat_scroll = usize::MAX;
+        if self.chat_follow {
+            self.chat_scroll = usize::MAX;
+        }
     }
 
     pub fn append_agent_token(&mut self, token: &str) {
@@ -317,7 +332,44 @@ impl TuiState {
                 self.messages.push(ChatMessage::agent(token));
             }
         }
+        if self.chat_follow {
+            self.chat_scroll = usize::MAX;
+        }
+    }
+
+    pub fn add_tool_log_entry(&mut self, entry: impl Into<String>) {
+        self.tool_log.push(entry.into());
+        if self.tool_follow {
+            self.tool_scroll = usize::MAX;
+        }
+    }
+
+    pub fn follow_chat(&mut self) {
+        self.chat_follow = true;
         self.chat_scroll = usize::MAX;
+    }
+
+    pub fn scroll_chat_by(&mut self, delta: isize) {
+        self.chat_follow = false;
+        if delta < 0 {
+            self.chat_scroll = self.chat_scroll.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.chat_scroll = self.chat_scroll.saturating_add(delta as usize);
+        }
+    }
+
+    pub fn follow_tool_log(&mut self) {
+        self.tool_follow = true;
+        self.tool_scroll = usize::MAX;
+    }
+
+    pub fn scroll_tool_by(&mut self, delta: isize) {
+        self.tool_follow = false;
+        if delta < 0 {
+            self.tool_scroll = self.tool_scroll.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.tool_scroll = self.tool_scroll.saturating_add(delta as usize);
+        }
     }
 
     pub fn set_diff(&mut self, patch: &str) {
@@ -374,6 +426,56 @@ impl TuiState {
                 self.input_cursor += i + c.len_utf8();
             }
         }
+    }
+
+    pub fn input_insert_str(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.input.insert_str(self.input_cursor, &normalized);
+        self.input_cursor += normalized.len();
+        self.autocomplete_idx = 0;
+    }
+
+    pub fn input_delete_word_back(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        // Skip trailing whitespace, then delete to start of word
+        let before = &self.input[..self.input_cursor];
+        let trimmed = before.trim_end();
+        let word_end = trimmed.len();
+        let word_start = trimmed.rfind(|c: char| c.is_whitespace() || c == '/' || c == '.')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.input.drain(word_start..self.input_cursor);
+        self.input_cursor = word_start;
+        self.autocomplete_idx = 0;
+    }
+
+    pub fn input_move_word_left(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let before = &self.input[..self.input_cursor];
+        // Skip whitespace backwards, then skip word chars backwards
+        let trimmed = before.trim_end();
+        let pos = trimmed.rfind(|c: char| c.is_whitespace() || c == '/' || c == '.')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.input_cursor = pos;
+    }
+
+    pub fn input_move_word_right(&mut self) {
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let after = &self.input[self.input_cursor..];
+        // Skip current word chars, then skip whitespace
+        let skip_word = after.find(|c: char| c.is_whitespace() || c == '/' || c == '.')
+            .unwrap_or(after.len());
+        let rest = &after[skip_word..];
+        let skip_ws = rest.find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        self.input_cursor += skip_word + skip_ws;
     }
 
     pub fn input_home(&mut self) {
@@ -597,6 +699,20 @@ fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
         "󰗡 Ready".to_string()
     };
 
+    // Token budget bar
+    let bar_width = 12usize;
+    let ratio = if state.token_limit > 0 {
+        (state.token_count as f64 / state.token_limit as f64).min(1.0)
+    } else {
+        0.0
+    };
+    let filled = (ratio * bar_width as f64).round() as usize;
+    let bar: String = format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(bar_width.saturating_sub(filled))
+    );
+
     let info_lines = vec![
         Line::from(vec![
             Span::styled("  ", Style::default().fg(Palette::TEXT_DIM)),
@@ -604,14 +720,7 @@ fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
                 state.current_model.as_str(),
                 Style::default().fg(Palette::ACCENT2).add_modifier(Modifier::BOLD),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Tokens: ", Style::default().fg(Palette::TEXT_DIM)),
-            Span::styled(
-                format!("{}/{}", state.token_count, state.token_limit),
-                Style::default().fg(tok_color),
-            ),
-            Span::styled("  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled("  ", Style::default()),
             Span::styled(
                 &state_icon,
                 Style::default()
@@ -621,6 +730,14 @@ fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
                         Palette::STATUS_OK
                     })
                     .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled(&bar, Style::default().fg(tok_color)),
+            Span::styled(
+                format!(" {}/{}", state.token_count, state.token_limit),
+                Style::default().fg(Palette::TEXT_DIM),
             ),
         ]),
     ];
@@ -672,12 +789,15 @@ fn draw_chat_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
     // Main area: chat history | tool log | input
     let main_area = h_chunks[1];
+    // Dynamically size input based on content lines (min 3, max 8)
+    let input_lines = state.input.lines().count().max(1);
+    let input_height = (input_lines as u16 + 2).clamp(3, 8);
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),    // chat
-            Constraint::Length(8), // tool log
-            Constraint::Length(3), // input
+            Constraint::Min(8),             // chat
+            Constraint::Length(8),           // tool log
+            Constraint::Length(input_height), // input (dynamic)
         ])
         .split(main_area);
 
@@ -809,25 +929,26 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
     };
 
     // Build rich lines
+    let content_width = area.width.saturating_sub(4) as usize;
     let mut lines: Vec<Line> = Vec::new();
     for msg in &state.messages {
         match &msg.kind {
             MessageKind::User => {
                 lines.push(Line::from(vec![
                     Span::styled(
-                        " ▶ You  ",
+                        " >> You  ",
                         Style::default()
                             .fg(Palette::USER_MSG)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        "─".repeat(area.width.saturating_sub(12) as usize),
+                        "─".repeat(content_width.saturating_sub(12)),
                         Style::default().fg(Palette::BORDER),
                     ),
                 ]));
-                for l in msg.content.lines() {
+                for wrapped in wrap_text_word(&msg.content, content_width.saturating_sub(6)) {
                     lines.push(Line::from(Span::styled(
-                        format!("   {} ", l),
+                        format!("   {} ", wrapped),
                         Style::default().fg(Palette::USER_MSG),
                     )));
                 }
@@ -836,19 +957,19 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
             MessageKind::Agent => {
                 lines.push(Line::from(vec![
                     Span::styled(
-                        " 󰭻 BarqCoder  ",
+                        " << BarqCoder  ",
                         Style::default()
                             .fg(Palette::AGENT_MSG)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        "─".repeat(area.width.saturating_sub(16) as usize),
+                        "─".repeat(content_width.saturating_sub(16)),
                         Style::default().fg(Palette::BORDER),
                     ),
                 ]));
-                for l in msg.content.lines() {
+                for wrapped in wrap_text_word(&msg.content, content_width.saturating_sub(6)) {
                     lines.push(Line::from(Span::styled(
-                        format!("   {} ", l),
+                        format!("   {} ", wrapped),
                         Style::default().fg(Palette::TEXT),
                     )));
                 }
@@ -909,15 +1030,16 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
         }
     }
 
-    // If thinking, append animated "..." line
+    // If thinking, append animated indicator
     if state.is_thinking {
         lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
             Span::styled(
-                format!(" {} ", spinner_frame(state.tick)),
+                bounce_frame(state.tick),
                 Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "BarqCoder is thinking…",
+                "  thinking…",
                 Style::default()
                     .fg(Palette::TEXT_DIM)
                     .add_modifier(Modifier::ITALIC),
@@ -1046,8 +1168,15 @@ fn draw_tool_log(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let total = log_lines.len();
     let height = area.height.saturating_sub(2) as usize;
     let scroll = if total > height {
-        (total - height) as u16
+        if state.tool_follow || state.tool_scroll == usize::MAX {
+            let bottom = total.saturating_sub(height);
+            state.tool_scroll = bottom;
+            bottom as u16
+        } else {
+            state.tool_scroll.min(total.saturating_sub(height)) as u16
+        }
     } else {
+        state.tool_scroll = 0;
         0
     };
 
@@ -1081,36 +1210,24 @@ fn draw_input(f: &mut Frame, area: Rect, state: &TuiState) {
         Palette::BORDER
     };
 
-    // Render cursor by splitting input at cursor position
-    let before_cursor = &state.input[..state.input_cursor];
-    let after_cursor = &state.input[state.input_cursor..];
+    // Build multi-line input with cursor
+    let content_height = area.height.saturating_sub(2) as usize;
+    let input_lines = build_input_lines(&state.input, state.input_cursor, state.is_thinking, state.tick);
 
-    let cursor_char = if after_cursor.is_empty() { " " } else { &after_cursor[..after_cursor.chars().next().map(|c| c.len_utf8()).unwrap_or(1)] };
-    let after_cursor_rest = if after_cursor.len() > cursor_char.len() { &after_cursor[cursor_char.len()..] } else { "" };
+    // Show only the tail if content exceeds visible area
+    let visible_start = input_lines.len().saturating_sub(content_height);
+    let visible_lines: Vec<Line> = input_lines.into_iter().skip(visible_start).collect();
 
+    // Title with char count
+    let char_count = state.input.chars().count();
+    let line_count = state.input.lines().count().max(1);
+    let title_extra = if char_count > 0 {
+        format!("— {}L/{}C  Shift+Enter: newline ", line_count, char_count)
+    } else {
+        "— /help for commands ".to_string()
+    };
 
-    // Combine prompt + input
-    let full_input = Line::from(vec![
-        if state.is_thinking {
-            Span::styled(
-                format!(" {} › ", spinner_frame(state.tick)),
-                Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(" ❯ ", Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD))
-        },
-        Span::styled(before_cursor, Style::default().fg(Palette::TEXT_BRIGHT)),
-        Span::styled(
-            cursor_char,
-            Style::default()
-                .fg(Palette::BG)
-                .bg(Palette::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(after_cursor_rest, Style::default().fg(Palette::TEXT_BRIGHT)),
-    ]);
-
-    let input_p = Paragraph::new(full_input)
+    let input_p = Paragraph::new(Text::from(visible_lines))
         .block(
             Block::default()
                 .title(Line::from(vec![
@@ -1121,7 +1238,7 @@ fn draw_input(f: &mut Frame, area: Rect, state: &TuiState) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        "— /help for commands ",
+                        title_extra,
                         Style::default().fg(Palette::TEXT_DIM),
                     ),
                 ]))
@@ -1133,8 +1250,7 @@ fn draw_input(f: &mut Frame, area: Rect, state: &TuiState) {
                 })
                 .border_style(Style::default().fg(border_color))
                 .style(Style::default().bg(Palette::SURFACE)),
-        )
-        .wrap(Wrap { trim: false });
+        );
     f.render_widget(input_p, area);
 
     // Status bar inside input area (top-right corner)
@@ -1549,6 +1665,139 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
     let keys_bar = Paragraph::new(Line::from(spans))
         .style(Style::default().bg(Palette::SURFACE2));
     f.render_widget(keys_bar, area);
+}
+
+// ─────────────────────────────────────────────
+// Input line builder — handles multi-line with cursor
+// ─────────────────────────────────────────────
+fn build_input_lines<'a>(input: &str, cursor: usize, is_thinking: bool, tick: usize) -> Vec<Line<'a>> {
+    let prompt_span = if is_thinking {
+        Span::styled(
+            format!(" {} > ", spinner_frame(tick)),
+            Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(" > ", Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD))
+    };
+
+    if input.is_empty() {
+        return vec![Line::from(vec![
+            prompt_span,
+            Span::styled(
+                " ",
+                Style::default().fg(Palette::BG).bg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ])];
+    }
+
+    // Split input into lines, tracking which line/col the cursor is on
+    let mut lines_text: Vec<&str> = input.split('\n').collect();
+    if input.ends_with('\n') {
+        lines_text.push("");
+    }
+
+    let mut cursor_line = 0usize;
+    let mut cursor_col = 0usize;
+    let mut pos = 0usize;
+    for (i, line_text) in lines_text.iter().enumerate() {
+        let line_end = pos + line_text.len();
+        if cursor <= line_end {
+            cursor_line = i;
+            cursor_col = cursor - pos;
+            break;
+        }
+        pos = line_end + 1; // +1 for the newline
+        cursor_line = i + 1;
+        cursor_col = 0;
+    }
+
+    let mut result = Vec::new();
+    for (i, line_text) in lines_text.iter().enumerate() {
+        let prefix = if i == 0 {
+            prompt_span.clone()
+        } else {
+            Span::styled("   ", Style::default().fg(Palette::TEXT_DIM))
+        };
+
+        if i == cursor_line {
+            let safe_col = cursor_col.min(line_text.len());
+            let before = &line_text[..safe_col];
+            let cursor_char = if safe_col < line_text.len() {
+                let ch = line_text[safe_col..].chars().next().unwrap();
+                &line_text[safe_col..safe_col + ch.len_utf8()]
+            } else {
+                " "
+            };
+            let after = if safe_col < line_text.len() {
+                let ch_len = line_text[safe_col..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                &line_text[safe_col + ch_len..]
+            } else {
+                ""
+            };
+
+            result.push(Line::from(vec![
+                prefix,
+                Span::styled(before.to_string(), Style::default().fg(Palette::TEXT_BRIGHT)),
+                Span::styled(
+                    cursor_char.to_string(),
+                    Style::default().fg(Palette::BG).bg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(after.to_string(), Style::default().fg(Palette::TEXT_BRIGHT)),
+            ]));
+        } else {
+            result.push(Line::from(vec![
+                prefix,
+                Span::styled(line_text.to_string(), Style::default().fg(Palette::TEXT_BRIGHT)),
+            ]));
+        }
+    }
+
+    result
+}
+
+// ─────────────────────────────────────────────
+// Word-boundary text wrapping
+// ─────────────────────────────────────────────
+fn wrap_text_word(text: &str, max_width: usize) -> Vec<String> {
+    let width = max_width.max(1);
+    let mut result = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            result.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for word in line.split_inclusive(char::is_whitespace) {
+            let wlen = word.chars().count();
+            if current_width + wlen > width && current_width > 0 {
+                result.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+            if wlen > width {
+                for ch in word.chars() {
+                    if current_width >= width {
+                        result.push(current);
+                        current = String::new();
+                        current_width = 0;
+                    }
+                    current.push(ch);
+                    current_width += 1;
+                }
+            } else {
+                current.push_str(word);
+                current_width += wlen;
+            }
+        }
+        if !current.is_empty() {
+            result.push(current);
+        }
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
 }
 
 // ─────────────────────────────────────────────
