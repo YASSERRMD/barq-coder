@@ -139,7 +139,6 @@ pub enum ActionKind {
     WriteFile {
         path: String,
         patch: String,
-        full_content: String,
     },
     /// Run a shell command (requires explicit user approval).
     ShellCommand { command: String, reason: String },
@@ -155,8 +154,8 @@ pub struct PendingAction {
 }
 
 impl PendingAction {
-    pub fn write_file(path: impl Into<String>, patch: impl Into<String>, full_content: impl Into<String>, agent: impl Into<String>) -> Self {
-        Self { kind: ActionKind::WriteFile { path: path.into(), patch: patch.into(), full_content: full_content.into() }, agent: agent.into(), approved: None }
+    pub fn write_file(path: impl Into<String>, patch: impl Into<String>, agent: impl Into<String>) -> Self {
+        Self { kind: ActionKind::WriteFile { path: path.into(), patch: patch.into() }, agent: agent.into(), approved: None }
     }
 
     pub fn shell_cmd(command: impl Into<String>, reason: impl Into<String>, agent: impl Into<String>) -> Self {
