@@ -49,6 +49,14 @@ pub fn spinner_frame(tick: usize) -> &'static str {
     SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
 }
 
+const BOUNCE_FRAMES: &[&str] = &[
+    "●∙∙∙∙", "∙●∙∙∙", "∙∙●∙∙", "∙∙∙●∙", "∙∙∙∙●", "∙∙∙●∙", "∙∙●∙∙", "∙●∙∙∙",
+];
+
+pub fn bounce_frame(tick: usize) -> &'static str {
+    BOUNCE_FRAMES[tick % BOUNCE_FRAMES.len()]
+}
+
 // ─────────────────────────────────────────────
 // Tab enum
 // ─────────────────────────────────────────────
@@ -253,6 +261,10 @@ pub struct TuiState {
     pub session_preview_title: String,
     pub session_preview: Vec<String>,
 
+    // Follow mode
+    pub chat_follow: bool,
+    pub tool_follow: bool,
+
     // Status
     pub is_thinking: bool,
     pub is_indexing: bool,
@@ -308,6 +320,8 @@ impl TuiState {
             },
             session_preview_title: "Session Preview".to_string(),
             session_preview: Vec::new(),
+            chat_follow: true,
+            tool_follow: true,
             is_thinking: false,
             is_indexing: false,
             tick: 0,
@@ -324,7 +338,9 @@ impl TuiState {
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
         // auto-scroll to bottom
-        self.chat_scroll = usize::MAX;
+        if self.chat_follow {
+            self.chat_scroll = usize::MAX;
+        }
     }
 
     pub fn append_agent_token(&mut self, token: &str) {
@@ -336,7 +352,9 @@ impl TuiState {
                 self.messages.push(ChatMessage::agent(token));
             }
         }
-        self.chat_scroll = usize::MAX;
+        if self.chat_follow {
+            self.chat_scroll = usize::MAX;
+        }
     }
 
     pub fn update_diff(&mut self, title: impl Into<String>, patch: &str) {
@@ -374,6 +392,88 @@ impl TuiState {
         self.input.insert_str(self.input_cursor, &normalized);
         self.input_cursor += normalized.len();
         self.autocomplete_idx = 0;
+    }
+
+    pub fn input_delete_word_back(&mut self) {
+        if self.input_cursor == 0 { return; }
+        let before = &self.input[..self.input_cursor];
+        let trimmed = before.trim_end();
+        let word_start = trimmed.rfind(|c: char| c.is_whitespace() || c == '/' || c == '.')
+            .map(|i| i + 1).unwrap_or(0);
+        self.input.drain(word_start..self.input_cursor);
+        self.input_cursor = word_start;
+        self.autocomplete_idx = 0;
+    }
+
+    pub fn input_move_word_left(&mut self) {
+        if self.input_cursor == 0 { return; }
+        let before = &self.input[..self.input_cursor];
+        let trimmed = before.trim_end();
+        self.input_cursor = trimmed.rfind(|c: char| c.is_whitespace() || c == '/' || c == '.')
+            .map(|i| i + 1).unwrap_or(0);
+    }
+
+    pub fn input_move_word_right(&mut self) {
+        if self.input_cursor >= self.input.len() { return; }
+        let after = &self.input[self.input_cursor..];
+        let skip_word = after.find(|c: char| c.is_whitespace() || c == '/' || c == '.')
+            .unwrap_or(after.len());
+        let rest = &after[skip_word..];
+        let skip_ws = rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len());
+        self.input_cursor += skip_word + skip_ws;
+    }
+
+    pub fn input_delete_forward(&mut self) {
+        if self.input_cursor < self.input.len() {
+            let ch_len = self.input[self.input_cursor..].chars().next()
+                .map(|c| c.len_utf8()).unwrap_or(0);
+            self.input.drain(self.input_cursor..self.input_cursor + ch_len);
+        }
+    }
+
+    pub fn input_clear_line(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+        self.autocomplete_idx = 0;
+    }
+
+    pub fn input_kill_to_end(&mut self) {
+        self.input.truncate(self.input_cursor);
+    }
+
+    pub fn add_tool_log_entry(&mut self, entry: impl Into<String>) {
+        self.tool_log.push(entry.into());
+        if self.tool_follow {
+            self.tool_scroll = usize::MAX;
+        }
+    }
+
+    pub fn follow_chat(&mut self) {
+        self.chat_follow = true;
+        self.chat_scroll = usize::MAX;
+    }
+
+    pub fn scroll_chat_by(&mut self, delta: isize) {
+        self.chat_follow = false;
+        if delta < 0 {
+            self.chat_scroll = self.chat_scroll.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.chat_scroll = self.chat_scroll.saturating_add(delta as usize);
+        }
+    }
+
+    pub fn follow_tool_log(&mut self) {
+        self.tool_follow = true;
+        self.tool_scroll = usize::MAX;
+    }
+
+    pub fn scroll_tool_by(&mut self, delta: isize) {
+        self.tool_follow = false;
+        if delta < 0 {
+            self.tool_scroll = self.tool_scroll.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.tool_scroll = self.tool_scroll.saturating_add(delta as usize);
+        }
     }
 
     pub fn input_delete_back(&mut self) {
@@ -464,12 +564,16 @@ impl TuiState {
     /// The canonical list of slash commands for autocomplete.
     pub fn slash_commands() -> &'static [(&'static str, &'static str)] {
         &[
-            ("/help",     "Show help message"),
-            ("/clear",    "Clear conversation"),
-            ("/config",   "Display current config"),
-            ("/goal",     "Start a multi-agent goal"),
-            ("/diff",     "Show active diff patch"),
-            ("/sessions", "Switch to sessions tab"),
+            ("/help",     "Show help & keybindings"),
+            ("/clear",    "Clear conversation history"),
+            ("/config",   "Display runtime config"),
+            ("/goal",     "Run multi-agent goal plan"),
+            ("/diff",     "Show latest diff patch"),
+            ("/sessions", "Browse session archive"),
+            ("/memory",   "View/add project memory"),
+            ("/doctor",   "Check Ollama connectivity"),
+            ("/index",    "Index workspace into BarqDB"),
+            ("/status",   "Show token usage & budget"),
         ]
     }
 
@@ -636,6 +740,17 @@ fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
         "󰗡 Ready".to_string()
     };
 
+    // Token budget progress bar
+    let bar_width: usize = 12;
+    let ratio = if state.token_limit > 0 {
+        (state.token_count as f64 / state.token_limit as f64).min(1.0)
+    } else {
+        0.0
+    };
+    let filled = (ratio * bar_width as f64).round() as usize;
+    let empty = bar_width.saturating_sub(filled);
+    let bar_str = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+
     let info_lines = vec![
         Line::from(vec![
             Span::styled("  ", Style::default().fg(Palette::TEXT_DIM)),
@@ -645,12 +760,15 @@ fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Tokens: ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled("  ", Style::default().fg(Palette::TEXT_DIM)),
             Span::styled(
-                format!("{}/{}", state.token_count, state.token_limit),
+                &bar_str,
                 Style::default().fg(tok_color),
             ),
-            Span::styled("  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled(
+                format!(" {}/{} ", state.token_count, state.token_limit),
+                Style::default().fg(tok_color),
+            ),
             Span::styled(
                 &state_icon,
                 Style::default()
@@ -692,31 +810,40 @@ fn draw_body(f: &mut Frame, area: Rect, state: &mut TuiState) {
 // Chat tab
 // ─────────────────────────────────────────────
 fn draw_chat_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    // Horizontal: sidebar | main
-    let h_chunks = if state.sidebar_visible {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(0)])
-            .split(area)
+    // Auto-hide sidebar when terminal is narrow
+    let show_sidebar = state.sidebar_visible && area.width >= 80;
+    let sidebar_width: u16 = if !show_sidebar {
+        0
+    } else if area.width < 100 {
+        24
+    } else if area.width < 140 {
+        28
     } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(0), Constraint::Min(0)])
-            .split(area)
+        32
     };
 
-    if state.sidebar_visible {
+    // Horizontal: sidebar | main
+    let h_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(sidebar_width), Constraint::Min(0)])
+        .split(area);
+
+    if show_sidebar {
         draw_sidebar(f, h_chunks[0], state);
     }
+
+    // Dynamic input height
+    let input_lines = state.input.lines().count().max(1);
+    let input_height = (input_lines as u16 + 2).clamp(3, 8);
 
     // Main area: chat history | tool log | input
     let main_area = h_chunks[1];
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),    // chat
-            Constraint::Length(8), // tool log
-            Constraint::Length(3), // input
+            Constraint::Min(8),              // chat
+            Constraint::Length(8),            // tool log
+            Constraint::Length(input_height), // input
         ])
         .split(main_area);
 
@@ -887,6 +1014,8 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
     };
 
     // Build rich lines
+    let content_width = area.width.saturating_sub(4) as usize;
+    let _ = content_width; // available for future wrapping logic
     let mut lines: Vec<Line> = Vec::new();
     for msg in &state.messages {
         match &msg.kind {
@@ -991,11 +1120,11 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
     if state.is_thinking {
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" {} ", spinner_frame(state.tick)),
+                format!(" {} ", bounce_frame(state.tick)),
                 Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "BarqCoder is thinking…",
+                "  thinking…",
                 Style::default()
                     .fg(Palette::TEXT_DIM)
                     .add_modifier(Modifier::ITALIC),
@@ -1124,7 +1253,7 @@ fn draw_tool_log(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let total = log_lines.len();
     let height = area.height.saturating_sub(2) as usize;
     let scroll = if total > height {
-        if state.tool_scroll == usize::MAX || state.tool_scroll + height >= total {
+        if state.tool_follow || state.tool_scroll == usize::MAX || state.tool_scroll + height >= total {
             let bottom = total.saturating_sub(height);
             state.tool_scroll = bottom;
             bottom as u16
@@ -1673,11 +1802,12 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
     let keys: &[(&str, &str)] = match state.active_tab {
         ActiveTab::Chat => &[
             ("Enter", "Send"),
+            ("S+Enter", "Newline"),
             ("↑/↓", "Move"),
             ("F1", "Focus"),
-            ("Tab", "Next Tab"),
-            ("Alt+S", "Toggle Sidebar"),
-            ("PgUp/Dn", "Scroll"),
+            ("Tab", "Tab"),
+            ("Alt+S", "Sidebar"),
+            ("^U", "Clear"),
             ("Esc", "Quit"),
         ],
         ActiveTab::Diff => &[
