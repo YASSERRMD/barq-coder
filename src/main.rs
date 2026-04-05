@@ -62,10 +62,349 @@ struct App {
     event_rx: Option<mpsc::Receiver<OrchestratorEvent>>,
     session_store: SessionStore,
     session_id: String,
-    pending_permission_requests: std::collections::VecDeque<(String, serde_json::Value, String, tokio::sync::oneshot::Sender<bool>)>,
+    pending_permission_requests: std::collections::VecDeque<PendingPermissionRequest>,
     pending_budget_request: Option<tokio::sync::oneshot::Sender<bool>>,
     cost: CostTracker,
     skip_permissions: bool,
+}
+
+struct PendingPermissionRequest {
+    name: String,
+    args: serde_json::Value,
+    reason: String,
+    tx: tokio::sync::oneshot::Sender<bool>,
+}
+
+enum PermissionDecision {
+    AllowOnce,
+    AllowRemembered,
+    Deny,
+}
+
+const TOOL_SUMMARY_MAX_CHARS: usize = 120;
+
+fn truncate_inline(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let mut shortened = String::new();
+    for ch in text.chars().take(max_chars.saturating_sub(1)) {
+        shortened.push(ch);
+    }
+    shortened.push('…');
+    shortened
+}
+
+fn content_stats(label: &str, text: Option<&str>) -> Option<String> {
+    let value = text?;
+    Some(format!(
+        "{}: {} lines / {} chars",
+        label,
+        value.lines().count().max(1),
+        value.chars().count()
+    ))
+}
+
+fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
+    match name {
+        "edit_file" => {
+            let path = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            let detail = if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
+                format!(
+                    "patch: {} lines / {} chars",
+                    patch.lines().count().max(1),
+                    patch.chars().count()
+                )
+            } else {
+                let mut bits = Vec::new();
+                if let Some(old) = content_stats("old", args.get("old_string").and_then(|v| v.as_str())) {
+                    bits.push(old);
+                }
+                if let Some(new) = content_stats("new", args.get("new_string").and_then(|v| v.as_str())) {
+                    bits.push(new);
+                }
+                bits.join(", ")
+            };
+
+            if detail.is_empty() {
+                format!("Calling edit_file on {}", path)
+            } else {
+                format!("Calling edit_file on {} ({})", path, detail)
+            }
+        }
+        "create_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            let detail = content_stats("content", args.get("content").and_then(|v| v.as_str()))
+                .unwrap_or_else(|| "content unavailable".to_string());
+            format!("Calling create_file for {} ({})", path, detail)
+        }
+        "shell_exec" => {
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            format!("Calling shell_exec: {}", truncate_inline(command, TOOL_SUMMARY_MAX_CHARS))
+        }
+        "git_ops" => {
+            let operation = args.get("operation").and_then(|v| v.as_str()).unwrap_or("status");
+            let extra = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
+            let command = if extra.trim().is_empty() {
+                format!("git {}", operation)
+            } else {
+                format!("git {} {}", operation, extra.trim())
+            };
+            format!("Calling git_ops: {}", truncate_inline(&command, TOOL_SUMMARY_MAX_CHARS))
+        }
+        _ => {
+            let pretty = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+            format!(
+                "Calling {} with {}",
+                name,
+                truncate_inline(&pretty, TOOL_SUMMARY_MAX_CHARS)
+            )
+        }
+    }
+}
+
+fn summarize_tool_result(name: &str, result: &serde_json::Value) -> String {
+    if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
+        return format!("{} failed: {}", name, truncate_inline(error, TOOL_SUMMARY_MAX_CHARS));
+    }
+
+    match name {
+        "edit_file" => {
+            let applied = result.get("applied").and_then(|v| v.as_bool()).unwrap_or(false);
+            let preview = result.get("preview").and_then(|v| v.as_bool()).unwrap_or(false);
+            let reverted = result.get("reverted").and_then(|v| v.as_bool()).unwrap_or(false);
+            if preview {
+                "edit_file preview generated".to_string()
+            } else if applied && reverted {
+                "edit_file applied then reverted".to_string()
+            } else if applied {
+                "edit_file applied".to_string()
+            } else {
+                "edit_file completed".to_string()
+            }
+        }
+        "create_file" => {
+            let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            if result.get("created").and_then(|v| v.as_bool()).unwrap_or(false) {
+                format!("Created {}", path)
+            } else {
+                format!("create_file completed for {}", path)
+            }
+        }
+        "shell_exec" => {
+            let exit_code = result.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let timed_out = result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false);
+            if timed_out {
+                format!("shell_exec timed out (exit {})", exit_code)
+            } else {
+                format!("shell_exec exited with {}", exit_code)
+            }
+        }
+        "git_ops" => {
+            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            if success {
+                "git_ops completed".to_string()
+            } else {
+                "git_ops reported an error".to_string()
+            }
+        }
+        _ => {
+            let pretty = serde_json::to_string(result).unwrap_or_else(|_| "{}".to_string());
+            format!("{} result: {}", name, truncate_inline(&pretty, TOOL_SUMMARY_MAX_CHARS))
+        }
+    }
+}
+
+fn truncate_multiline(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut kept = Vec::new();
+    let mut used_chars = 0usize;
+    let all_lines: Vec<&str> = text.lines().collect();
+
+    for line in &all_lines {
+        let line_len = line.chars().count();
+        let next_chars = used_chars + line_len + usize::from(!kept.is_empty());
+        if kept.len() >= max_lines || next_chars > max_chars {
+            break;
+        }
+        kept.push((*line).to_string());
+        used_chars = next_chars;
+    }
+
+    if kept.len() < all_lines.len() || text.chars().count() > used_chars {
+        kept.push(format!(
+            "… truncated {} more lines",
+            all_lines.len().saturating_sub(kept.len())
+        ));
+    }
+
+    kept.join("\n")
+}
+
+fn build_permission_preview(path: &str, old: Option<&str>, new: Option<&str>) -> String {
+    let mut lines = vec![
+        format!("--- a/{}", path),
+        format!("+++ b/{}", path),
+        "@@ pending @@".to_string(),
+    ];
+
+    if let Some(old) = old {
+        for line in old.lines() {
+            lines.push(format!("-{}", line));
+        }
+    }
+    if let Some(new) = new {
+        for line in new.lines() {
+            lines.push(format!("+{}", line));
+        }
+    }
+
+    truncate_multiline(&lines.join("\n"), 80, 4_000)
+}
+
+fn build_pending_action(
+    name: &str,
+    args: &serde_json::Value,
+    reason: &str,
+) -> tui::PendingAction {
+    match name {
+        "edit_file" => {
+            let path = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let patch = args
+                .get("patch")
+                .and_then(|v| v.as_str())
+                .map(|value| truncate_multiline(value, 80, 4_000))
+                .unwrap_or_else(|| {
+                    build_permission_preview(
+                        &path,
+                        args.get("old_string").and_then(|v| v.as_str()),
+                        args.get("new_string").and_then(|v| v.as_str()),
+                    )
+                });
+            let full_content = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            tui::PendingAction::write_file(path, patch, full_content, name)
+        }
+        "create_file" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let patch = build_permission_preview(&path, None, Some(&content));
+            tui::PendingAction::write_file(path, patch, content, name)
+        }
+        "shell_exec" => {
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            tui::PendingAction::shell_cmd(command, reason, name)
+        }
+        "git_ops" => {
+            let operation = args.get("operation").and_then(|v| v.as_str()).unwrap_or("status");
+            let extra = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
+            let command = if extra.trim().is_empty() {
+                format!("git {}", operation)
+            } else {
+                format!("git {} {}", operation, extra.trim())
+            };
+            tui::PendingAction::shell_cmd(command, reason, name)
+        }
+        _ => tui::PendingAction::shell_cmd(name, reason, name),
+    }
+}
+
+fn approval_hint() -> &'static str {
+    "[Y] allow once  [A] allow this tool for the session  [N] deny  [Esc] deny all"
+}
+
+fn show_next_permission_prompt(app: &mut App) {
+    if let Some(request) = app.pending_permission_requests.front() {
+        app.tui.permission_prompt = Some(tui::PermissionPrompt {
+            title: format!("Approve {}", request.name),
+            reason: request.reason.clone(),
+            hint: approval_hint().to_string(),
+            queue_len: app.pending_permission_requests.len(),
+        });
+        app.tui.set_status(
+            format!("Approval required for {}", request.name),
+            false,
+        );
+    } else {
+        app.tui.permission_prompt = None;
+        app.tui.clear_status();
+    }
+}
+
+fn resolve_permission_request(app: &mut App, decision: PermissionDecision) {
+    let Some(request) = app.pending_permission_requests.pop_front() else {
+        return;
+    };
+
+    match decision {
+        PermissionDecision::AllowOnce => {
+            let _ = request.tx.send(true);
+            app.tui
+                .add_message(ChatMessage::system(format!("Approved once: {}", request.name)));
+        }
+        PermissionDecision::AllowRemembered => {
+            app.orchestrator.permissions.auto_allow_tool(&request.name);
+            let _ = request.tx.send(true);
+            app.tui.add_message(ChatMessage::system(format!(
+                "Approved and remembered for this session: {}",
+                request.name
+            )));
+        }
+        PermissionDecision::Deny => {
+            let _ = request.tx.send(false);
+            app.tui
+                .add_message(ChatMessage::system(format!("Denied: {}", request.name)));
+        }
+    }
+
+    if !app.tui.action_queue.is_empty() {
+        app.tui.action_queue.remove(0);
+    }
+    if app.tui.action_queue.is_empty() {
+        app.tui.action_queue_selected = 0;
+        app.tui.action_preview_scroll = 0;
+    } else {
+        app.tui.action_queue_selected = app.tui.action_queue_selected.min(app.tui.action_queue.len() - 1);
+        app.tui.action_preview_scroll = 0;
+    }
+
+    if app.pending_permission_requests.is_empty() {
+        app.tui.permission_prompt = None;
+        app.tui.clear_status();
+        app.tui.is_thinking = true;
+    } else {
+        show_next_permission_prompt(app);
+    }
+}
+
+fn deny_all_permission_requests(app: &mut App) {
+    while !app.pending_permission_requests.is_empty() {
+        resolve_permission_request(app, PermissionDecision::Deny);
+    }
+    app.tui.permission_prompt = None;
+    app.tui.clear_status();
+    app.tui.is_thinking = true;
 }
 
 impl App {
@@ -190,10 +529,13 @@ impl App {
                     self.tui.add_message(ChatMessage::agent(&content));
                 }
                 SessionEvent::ToolCall { name, args, .. } => {
-                    self.tui.add_message(ChatMessage::tool_call(format!(
-                        "{} ← {}",
-                        name, args
-                    )));
+                    self.tui
+                        .add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
+                }
+                SessionEvent::ToolResult { name, result, .. } => {
+                    let entry = summarize_tool_result(&name, &result);
+                    self.tui.tool_log.push(entry.clone());
+                    self.tui.add_message(ChatMessage::tool_result(entry));
                 }
                 SessionEvent::EditApplied { file, patch, .. } => {
                     // Just show as system message for historical load
@@ -399,6 +741,7 @@ async fn run_app<B: ratatui::backend::Backend>(
 
     loop {
         terminal.draw(|f| tui::draw(f, &mut app.tui))?;
+        let mut queued_permissions = Vec::new();
 
         // ── Orchestrator event drain ──────────────────────────────────────────
         if let Some(rx) = &mut app.event_rx {
@@ -407,20 +750,20 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::Token(t) => {
                         app.tui.is_thinking = true;
                         app.tui.append_agent_token(&t);
-                        let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&t));
                     }
                     OrchestratorEvent::ToolCall { name, args } => {
                         app.tui.current_tool = Some(name.clone());
-                        let entry = format!("Calling {} with {}", name, args);
+                        let entry = summarize_tool_call(&name, &args);
                         app.tui.tool_log.push(entry.clone());
                         app.tui.add_message(ChatMessage::tool_call(&entry));
                         let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_call(&name, args.clone()));
                     }
                     OrchestratorEvent::ToolResult { name, result } => {
                         app.tui.current_tool = None;
-                        let entry = format!("Result for {}: {}", name, result);
+                        let entry = summarize_tool_result(&name, &result);
                         app.tui.tool_log.push(entry.clone());
                         app.tui.add_message(ChatMessage::tool_result(&entry));
+                        let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_result(&name, result));
                     }
                     OrchestratorEvent::PermissionRequested { name, args, reason, tx } => {
                         app.tui.current_tool = None;
@@ -430,18 +773,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                             let _ = tx.send(true);
                             app.tui.tool_log.push(format!("Auto-approved: {} (skip_permissions)", name));
                         } else {
-                            // Pause thinking so user knows we need input
                             app.tui.is_thinking = false;
-                            app.pending_permission_requests.push_back((name.clone(), args.clone(), reason.clone(), tx));
-
-                            // Show prompt for the first queued request
-                            if app.pending_permission_requests.len() == 1 {
-                                app.tui.add_message(ChatMessage::system(format!(
-                                    ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
-                                    name, reason
-                                )));
-                                app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", name), false);
-                            }
+                            queued_permissions.push((name, args, reason, tx));
                         }
                     }
                     OrchestratorEvent::BudgetWarning { used_usd, cap_usd, pct } => {
@@ -465,7 +798,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::Done(answer) => {
                         app.tui.is_thinking = false;
                         app.tui.current_tool = None;
-                        app.tui.add_message(ChatMessage::agent(&answer));
+                        let already_streamed = matches!(
+                            app.tui.messages.last(),
+                            Some(last)
+                                if matches!(last.kind, tui::MessageKind::Agent)
+                                    && last.content == answer
+                        );
+                        if !already_streamed {
+                            app.tui.add_message(ChatMessage::agent(&answer));
+                        }
                         app.tui.set_status("Done", false);
                         app.event_rx = None;
                         let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&answer));
@@ -481,6 +822,27 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                 }
             }
+        }
+
+        for (name, args, reason, tx) in queued_permissions.drain(..) {
+            app.pending_permission_requests.push_back(PendingPermissionRequest {
+                name: name.clone(),
+                args: args.clone(),
+                reason: reason.clone(),
+                tx,
+            });
+            app.tui
+                .action_queue
+                .push(build_pending_action(&name, &args, &reason));
+            if app.tui.action_queue.len() == 1 {
+                app.tui.action_queue_selected = 0;
+            }
+            app.tui
+                .add_message(ChatMessage::system(format!("Approval required for {}", name)));
+        }
+
+        if !app.pending_permission_requests.is_empty() {
+            show_next_permission_prompt(app);
         }
 
         // ── Input events ──────────────────────────────────────────────────────
@@ -517,59 +879,38 @@ async fn run_app<B: ratatui::backend::Backend>(
 // ─────────────────────────────────────────────────────────────────────────────
 fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     // ── PERMISSION GATE ─────────────────────────────────────────────────
-    // When there are pending permission requests, ALL key input is
-    // captured here. Only Y, N, and Esc are accepted. Every other key
-    // is swallowed so that the user MUST respond before continuing.
     if !app.pending_permission_requests.is_empty() {
         match key {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
-                    let _ = tx.send(true);
-                    app.tui.add_message(ChatMessage::system(format!("Approved: {}", name)));
-                    app.tui.clear_status();
-
-                    if app.pending_permission_requests.is_empty() {
-                        app.tui.is_thinking = true;
-                    } else if let Some((next_name, _, next_reason, _)) = app.pending_permission_requests.front() {
-                        app.tui.add_message(ChatMessage::system(format!(
-                            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
-                            next_name, next_reason
-                        )));
-                        app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", next_name), false);
-                    }
-                }
+                resolve_permission_request(app, PermissionDecision::AllowOnce);
+                return;
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                resolve_permission_request(app, PermissionDecision::AllowRemembered);
                 return;
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                if let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
-                    let _ = tx.send(false);
-                    app.tui.add_message(ChatMessage::system(format!("Denied: {}", name)));
-                    app.tui.clear_status();
-
-                    if app.pending_permission_requests.is_empty() {
-                        app.tui.is_thinking = true;
-                    } else if let Some((next_name, _, next_reason, _)) = app.pending_permission_requests.front() {
-                        app.tui.add_message(ChatMessage::system(format!(
-                            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nPress [Y] to ALLOW  |  [N] to DENY  |  [Esc] to deny all",
-                            next_name, next_reason
-                        )));
-                        app.tui.set_status(format!("Waiting: approve '{}' [Y/N]", next_name), false);
-                    }
-                }
+                resolve_permission_request(app, PermissionDecision::Deny);
                 return;
             }
             KeyCode::Esc => {
-                // Deny ALL remaining and resume
-                while let Some((name, _, _, tx)) = app.pending_permission_requests.pop_front() {
-                    let _ = tx.send(false);
-                    app.tui.add_message(ChatMessage::system(format!("Denied: {}", name)));
-                }
-                app.tui.clear_status();
-                app.tui.is_thinking = true;
+                deny_all_permission_requests(app);
+                return;
+            }
+            KeyCode::Tab => {
+                app.tui.active_tab = ActiveTab::ActionQueue;
+                return;
+            }
+            KeyCode::BackTab => {
+                app.tui.active_tab = ActiveTab::Chat;
+                return;
+            }
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                app.tui.active_tab = ActiveTab::ActionQueue;
+                handle_action_queue_keys(app, key);
                 return;
             }
             _ => {
-                // Swallow ALL other keys during permission gate
                 return;
             }
         }
@@ -769,10 +1110,14 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                                 app.tui.append_agent_token(&content);
                             }
                             SessionEvent::ToolCall { name, args, .. } => {
-                                app.tui.add_message(ChatMessage::tool_call(format!(
-                                    "{} ← {}",
-                                    name, args
+                                app.tui.add_message(ChatMessage::tool_call(summarize_tool_call(
+                                    &name, &args,
                                 )));
+                            }
+                            SessionEvent::ToolResult { name, result, .. } => {
+                                let entry = summarize_tool_result(&name, &result);
+                                app.tui.tool_log.push(entry.clone());
+                                app.tui.add_message(ChatMessage::tool_result(entry));
                             }
                             SessionEvent::EditApplied { file, patch, .. } => {
                                 app.tui.set_diff(&patch);
@@ -816,14 +1161,26 @@ fn handle_action_queue_keys(app: &mut App, key: KeyCode) {
             app.tui.action_preview_scroll += 20;
         }
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            if let Some(action) = app.tui.action_queue.get_mut(app.tui.action_queue_selected) {
-                action.approved = Some(true);
-                // Implementation of user approval application will happen asynchronously in a background task monitoring the queue.
+            if app.pending_permission_requests.is_empty() {
+                if let Some(action) = app.tui.action_queue.get_mut(app.tui.action_queue_selected) {
+                    action.approved = Some(true);
+                }
+            } else {
+                resolve_permission_request(app, PermissionDecision::AllowOnce);
+            }
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            if !app.pending_permission_requests.is_empty() {
+                resolve_permission_request(app, PermissionDecision::AllowRemembered);
             }
         }
         KeyCode::Char('n') | KeyCode::Char('N') => {
-            if let Some(action) = app.tui.action_queue.get_mut(app.tui.action_queue_selected) {
-                action.approved = Some(false);
+            if app.pending_permission_requests.is_empty() {
+                if let Some(action) = app.tui.action_queue.get_mut(app.tui.action_queue_selected) {
+                    action.approved = Some(false);
+                }
+            } else {
+                resolve_permission_request(app, PermissionDecision::Deny);
             }
         }
         _ => {}
@@ -977,6 +1334,7 @@ Keys:
   Tab / Shift+Tab Switch tabs
   Alt+S           Toggle sidebar
   F1              Toggle sidebar focus
+  Y / A / N       Approve once, allow this tool, or deny
   Esc             Quit";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -988,6 +1346,42 @@ impl TuiState {
     }
     pub fn mark_quit(&mut self) {
         self._quit = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{summarize_tool_call, summarize_tool_result};
+    use serde_json::json;
+
+    #[test]
+    fn summarize_create_file_call_reports_counts_not_full_content() {
+        let summary = summarize_tool_call(
+            "create_file",
+            &json!({
+                "path": "src/generated.rs",
+                "content": "fn main() {}\n".repeat(80),
+            }),
+        );
+
+        assert!(summary.contains("Calling create_file for src/generated.rs"));
+        assert!(summary.contains("80 lines"));
+        assert!(!summary.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn summarize_shell_result_prefers_exit_code() {
+        let summary = summarize_tool_result(
+            "shell_exec",
+            &json!({
+                "stdout": "ok",
+                "stderr": "",
+                "exit_code": 0,
+                "timed_out": false
+            }),
+        );
+
+        assert_eq!(summary, "shell_exec exited with 0");
     }
 }
 
