@@ -2,8 +2,8 @@
 
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -633,7 +633,7 @@ async fn main() -> anyhow::Result<()> {
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -649,7 +649,8 @@ async fn main() -> anyhow::Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
 
     if let Err(err) = res {
@@ -854,6 +855,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         // clear transient status on next keypress
                     }
                 }
+                Event::Paste(text) => handle_paste(app, &text),
                 Event::Mouse(m) => handle_mouse(app, m),
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -958,6 +960,9 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     // Alt+S → toggle sidebar
     if mods == KeyModifiers::ALT && key == KeyCode::Char('s') {
         app.tui.sidebar_visible = !app.tui.sidebar_visible;
+        if !app.tui.sidebar_visible && app.tui.focus == Focus::Sidebar {
+            app.tui.focus = Focus::Input;
+        }
         return;
     }
 
@@ -1017,48 +1022,81 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
 
         // Character input
         KeyCode::Char(c) => {
+            app.tui.focus = Focus::Input;
             app.tui.input_insert(c);
         }
 
         // Editing
-        KeyCode::Backspace => app.tui.input_delete_back(),
-        KeyCode::Left => app.tui.input_move_left(),
-        KeyCode::Right => app.tui.input_move_right(),
-        KeyCode::Home => app.tui.input_home(),
-        KeyCode::End => app.tui.input_end(),
+        KeyCode::Backspace => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_delete_back();
+        }
+        KeyCode::Left => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_move_left();
+        }
+        KeyCode::Right => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_move_right();
+        }
+        KeyCode::Home => match app.tui.focus {
+            Focus::Input => app.tui.input_home(),
+            Focus::Chat => app.tui.chat_scroll = 0,
+            Focus::ToolLog => app.tui.tool_scroll = 0,
+            Focus::Sidebar => app.tui.file_list_state.select(Some(0)),
+        },
+        KeyCode::End => match app.tui.focus {
+            Focus::Input => app.tui.input_end(),
+            Focus::Chat => app.tui.chat_scroll = usize::MAX,
+            Focus::ToolLog => app.tui.tool_scroll = usize::MAX,
+            Focus::Sidebar => {
+                if !app.tui.workspace_files.is_empty() {
+                    app.tui
+                        .file_list_state
+                        .select(Some(app.tui.workspace_files.len().saturating_sub(1)));
+                }
+            }
+        },
 
         // History
-        KeyCode::Up => {
-            if app.tui.focus == Focus::Input {
-                app.tui.history_prev();
-            } else {
-                // scroll chat
-                app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(1);
-            }
-        }
-        KeyCode::Down => {
-            if app.tui.focus == Focus::Input {
-                app.tui.history_next();
-            } else {
-                app.tui.chat_scroll += 1;
-            }
-        }
+        KeyCode::Up => match app.tui.focus {
+            Focus::Input => app.tui.history_prev(),
+            Focus::Chat => app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(1),
+            Focus::ToolLog => app.tui.tool_scroll = app.tui.tool_scroll.saturating_sub(1),
+            Focus::Sidebar => move_sidebar_selection(
+                &mut app.tui.file_list_state,
+                app.tui.workspace_files.len(),
+                -1,
+            ),
+        },
+        KeyCode::Down => match app.tui.focus {
+            Focus::Input => app.tui.history_next(),
+            Focus::Chat => app.tui.chat_scroll += 1,
+            Focus::ToolLog => app.tui.tool_scroll += 1,
+            Focus::Sidebar => move_sidebar_selection(
+                &mut app.tui.file_list_state,
+                app.tui.workspace_files.len(),
+                1,
+            ),
+        },
 
         // Page scroll for chat
         KeyCode::PageUp => {
-            app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(10);
+            match app.tui.focus {
+                Focus::ToolLog => app.tui.tool_scroll = app.tui.tool_scroll.saturating_sub(10),
+                _ => app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(10),
+            }
         }
         KeyCode::PageDown => {
-            app.tui.chat_scroll += 10;
+            match app.tui.focus {
+                Focus::ToolLog => app.tui.tool_scroll += 10,
+                _ => app.tui.chat_scroll += 10,
+            }
         }
 
         // Sidebar navigation
         KeyCode::F(1) => {
-            app.tui.focus = if app.tui.focus == Focus::Sidebar {
-                Focus::Input
-            } else {
-                Focus::Sidebar
-            };
+            app.tui.cycle_focus();
         }
 
         _ => {}
@@ -1205,6 +1243,35 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
         },
         _ => {}
     }
+}
+
+fn handle_paste(app: &mut App, text: &str) {
+    if !app.pending_permission_requests.is_empty() || app.pending_budget_request.is_some() {
+        return;
+    }
+
+    if app.tui.active_tab != ActiveTab::Chat {
+        app.tui.active_tab = ActiveTab::Chat;
+    }
+
+    app.tui.focus = Focus::Input;
+    app.tui.input_insert_str(text);
+    let line_count = text.lines().count().max(1);
+    app.tui.set_status(
+        format!("Pasted {} lines / {} chars", line_count, text.chars().count()),
+        false,
+    );
+}
+
+fn move_sidebar_selection(state: &mut ratatui::widgets::ListState, len: usize, delta: isize) {
+    if len == 0 {
+        state.select(None);
+        return;
+    }
+
+    let current = state.selected().unwrap_or(0) as isize;
+    let next = ((current + delta).max(0) as usize).min(len.saturating_sub(1));
+    state.select(Some(next));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

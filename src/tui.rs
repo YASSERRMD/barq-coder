@@ -365,6 +365,13 @@ impl TuiState {
         self.autocomplete_idx = 0;
     }
 
+    pub fn input_insert_str(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.input.insert_str(self.input_cursor, &normalized);
+        self.input_cursor += normalized.len();
+        self.autocomplete_idx = 0;
+    }
+
     pub fn input_delete_back(&mut self) {
         if self.input_cursor == 0 {
             return;
@@ -433,17 +440,27 @@ impl TuiState {
     }
 
     pub fn commit_input(&mut self) -> Option<String> {
-        let trimmed = self.input.trim().to_string();
-        if trimmed.is_empty() {
+        let committed = self.input.clone();
+        if committed.trim().is_empty() {
             return None;
         }
 
-        self.input_history.push(trimmed.clone());
+        self.input_history.push(committed.clone());
         self.input_history_idx = self.input_history.len();
         self.input.clear();
         self.input_cursor = 0;
         self.autocomplete_idx = 0;
-        Some(trimmed)
+        Some(committed)
+    }
+
+    pub fn cycle_focus(&mut self) {
+        self.focus = match (self.focus, self.sidebar_visible) {
+            (Focus::Input, _) => Focus::Chat,
+            (Focus::Chat, _) => Focus::ToolLog,
+            (Focus::ToolLog, true) => Focus::Sidebar,
+            (Focus::ToolLog, false) => Focus::Input,
+            (Focus::Sidebar, _) => Focus::Input,
+        };
     }
 
     pub fn slash_commands() -> &'static [(&'static str, &'static str)] {
@@ -587,7 +604,7 @@ fn draw_chat_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let main = columns[1];
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(7), Constraint::Length(3)])
+        .constraints([Constraint::Min(10), Constraint::Length(6), Constraint::Length(6)])
         .split(main);
 
     draw_chat_history(f, rows[0], state);
@@ -755,29 +772,24 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
 }
 
 fn draw_input_box(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    let before = &state.input[..state.input_cursor];
-    let after = &state.input[state.input_cursor..];
-    let cursor_width = after.chars().next().map(|ch| ch.len_utf8()).unwrap_or(0);
-    let cursor = if cursor_width == 0 { " " } else { &after[..cursor_width] };
-    let after_rest = if cursor_width == 0 { "" } else { &after[cursor_width..] };
-
     let title = match state.status_message.as_deref() {
         Some(message) if !message.is_empty() => format!("Composer  {}", trim_chars(message, 60)),
+        _ if !state.input.is_empty() => format!(
+            "Composer  {} lines / {} chars",
+            state.input.lines().count().max(1),
+            state.input.chars().count()
+        ),
         _ => "Composer".to_string(),
     };
 
-    let input = Paragraph::new(Line::from(vec![
-        Span::styled("> ", Style::default().fg(Palette::BRAND).add_modifier(Modifier::BOLD)),
-        Span::styled(before, Style::default().fg(Palette::TEXT)),
-        Span::styled(
-            cursor,
-            Style::default()
-                .fg(Palette::PANEL)
-                .bg(Palette::TEXT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(after_rest, Style::default().fg(Palette::TEXT)),
-    ]))
+    let content_width = area.width.saturating_sub(4) as usize;
+    let content_height = area.height.saturating_sub(2) as usize;
+    let input = Paragraph::new(Text::from(build_composer_lines(
+        &state.input,
+        state.input_cursor,
+        content_width,
+        content_height,
+    )))
     .block(panel_block(&title, state.focus == Focus::Input))
     .alignment(Alignment::Left)
     .wrap(Wrap { trim: false });
@@ -1184,6 +1196,80 @@ fn trim_chars(text: &str, max_chars: usize) -> String {
     trimmed
 }
 
+fn build_composer_lines(
+    input: &str,
+    cursor: usize,
+    max_width: usize,
+    max_lines: usize,
+) -> Vec<Line<'static>> {
+    let content_width = max_width.saturating_sub(2).max(1);
+    let mut with_cursor = input.to_string();
+    if cursor <= with_cursor.len() {
+        with_cursor.insert(cursor, '|');
+    } else {
+        with_cursor.push('|');
+    }
+
+    if with_cursor.is_empty() {
+        with_cursor.push('|');
+    }
+
+    let mut wrapped = Vec::new();
+    for logical_line in with_cursor.split('\n') {
+        wrapped.extend(wrap_visual_line(logical_line, content_width));
+    }
+
+    if wrapped.is_empty() {
+        wrapped.push(String::from("|"));
+    }
+
+    let visible_lines = max_lines.max(1);
+    let start = wrapped.len().saturating_sub(visible_lines);
+
+    wrapped[start..]
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            let prefix = if start == 0 && idx == 0 {
+                "> "
+            } else if idx == 0 {
+                "... "
+            } else {
+                "    "
+            };
+            Line::from(Span::styled(
+                format!("{}{}", prefix, line),
+                Style::default().fg(Palette::TEXT),
+            ))
+        })
+        .collect()
+}
+
+fn wrap_visual_line(line: &str, max_width: usize) -> Vec<String> {
+    let width = max_width.max(1);
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    let mut wrapped = Vec::new();
+
+    if line.is_empty() {
+        wrapped.push(String::new());
+        return wrapped;
+    }
+
+    for ch in line.chars() {
+        if current_width == width {
+            wrapped.push(current);
+            current = String::new();
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += 1;
+    }
+
+    wrapped.push(current);
+    wrapped
+}
+
 fn status_label(state: &TuiState) -> String {
     if state.is_indexing {
         format!("{} indexing", spinner_frame(state.tick))
@@ -1196,6 +1282,45 @@ fn status_label(state: &TuiState) -> String {
         format!("{} approval waiting", state.action_queue.len())
     } else {
         "ready".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_composer_lines, Focus, TuiState};
+
+    #[test]
+    fn input_insert_str_normalizes_pasted_newlines() {
+        let mut state = TuiState::new(4096, "model".to_string(), "session".to_string());
+        state.input_insert_str("alpha\r\nbeta\rgamma");
+
+        assert_eq!(state.input, "alpha\nbeta\ngamma");
+        assert_eq!(state.input_cursor, state.input.len());
+    }
+
+    #[test]
+    fn cycle_focus_reaches_chat_and_tool_panels() {
+        let mut state = TuiState::new(4096, "model".to_string(), "session".to_string());
+
+        state.cycle_focus();
+        assert_eq!(state.focus, Focus::Chat);
+        state.cycle_focus();
+        assert_eq!(state.focus, Focus::ToolLog);
+        state.cycle_focus();
+        assert_eq!(state.focus, Focus::Sidebar);
+        state.cycle_focus();
+        assert_eq!(state.focus, Focus::Input);
+    }
+
+    #[test]
+    fn composer_lines_keep_tail_of_large_prompt_visible() {
+        let prompt = "line1\nline2\nline3\nline4\nline5";
+        let lines = build_composer_lines(prompt, prompt.len(), 32, 3);
+        let rendered: Vec<String> = lines.into_iter().map(|line| line.to_string()).collect();
+
+        assert_eq!(rendered.len(), 3);
+        assert!(rendered[0].starts_with("... "));
+        assert!(rendered.iter().any(|line| line.contains("line5|")));
     }
 }
 
