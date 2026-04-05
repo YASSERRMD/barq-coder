@@ -569,7 +569,7 @@ fn handle_key(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     }
 }
 
-fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
+fn handle_chat_keys(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     // ── Autocomplete interception ──
     // When the autocomplete popup is visible, Up/Down navigate it,
     // Tab accepts the selection, and Enter accepts then submits.
@@ -606,57 +606,95 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, _mods: KeyModifiers) {
         }
     }
 
-    match key {
+    match (key, mods) {
+        // Shift+Enter → insert newline (multi-line input)
+        (KeyCode::Enter, m) if m.contains(KeyModifiers::SHIFT) => {
+            app.tui.input_insert('\n');
+        }
+
         // Submit
-        KeyCode::Enter => {
+        (KeyCode::Enter, _) => {
             if let Some(input) = app.tui.commit_input() {
                 submit_input(app, &input);
             }
         }
 
+        // Ctrl+Backspace → delete word
+        (KeyCode::Backspace, m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.input_delete_word_back();
+        }
+
+        // Ctrl+Left → move word left
+        (KeyCode::Left, m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.input_move_word_left();
+        }
+
+        // Ctrl+Right → move word right
+        (KeyCode::Right, m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.input_move_word_right();
+        }
+
         // Character input
-        KeyCode::Char(c) => {
+        (KeyCode::Char(c), _) => {
             app.tui.input_insert(c);
         }
 
         // Editing
-        KeyCode::Backspace => app.tui.input_delete_back(),
-        KeyCode::Left => app.tui.input_move_left(),
-        KeyCode::Right => app.tui.input_move_right(),
-        KeyCode::Home => app.tui.input_home(),
-        KeyCode::End => app.tui.input_end(),
-
-        // History
-        KeyCode::Up => {
-            if app.tui.focus == Focus::Input {
-                app.tui.history_prev();
-            } else {
-                // scroll chat
-                app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(1);
+        (KeyCode::Backspace, _) => app.tui.input_delete_back(),
+        (KeyCode::Left, _) => app.tui.input_move_left(),
+        (KeyCode::Right, _) => app.tui.input_move_right(),
+        (KeyCode::Home, _) => match app.tui.focus {
+            Focus::Input => app.tui.input_home(),
+            Focus::Chat => {
+                app.tui.chat_follow = false;
+                app.tui.chat_scroll = 0;
             }
-        }
-        KeyCode::Down => {
-            if app.tui.focus == Focus::Input {
-                app.tui.history_next();
-            } else {
-                app.tui.chat_scroll += 1;
-            }
-        }
+            _ => {}
+        },
+        (KeyCode::End, _) => match app.tui.focus {
+            Focus::Input => app.tui.input_end(),
+            Focus::Chat => app.tui.follow_chat(),
+            Focus::ToolLog => app.tui.follow_tool_log(),
+            _ => {}
+        },
 
-        // Page scroll for chat
-        KeyCode::PageUp => {
-            app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(10);
-        }
-        KeyCode::PageDown => {
-            app.tui.chat_scroll += 10;
-        }
+        // History / scroll
+        (KeyCode::Up, _) => match app.tui.focus {
+            Focus::Input => app.tui.history_prev(),
+            Focus::Chat => app.tui.scroll_chat_by(-1),
+            Focus::ToolLog => app.tui.scroll_tool_by(-1),
+            _ => {}
+        },
+        (KeyCode::Down, _) => match app.tui.focus {
+            Focus::Input => app.tui.history_next(),
+            Focus::Chat => app.tui.scroll_chat_by(1),
+            Focus::ToolLog => app.tui.scroll_tool_by(1),
+            _ => {}
+        },
 
-        // Sidebar navigation
-        KeyCode::F(1) => {
-            app.tui.focus = if app.tui.focus == Focus::Sidebar {
-                Focus::Input
-            } else {
-                Focus::Sidebar
+        // Page scroll
+        (KeyCode::PageUp, _) => match app.tui.focus {
+            Focus::ToolLog => app.tui.scroll_tool_by(-10),
+            _ => app.tui.scroll_chat_by(-10),
+        },
+        (KeyCode::PageDown, _) => match app.tui.focus {
+            Focus::ToolLog => app.tui.scroll_tool_by(10),
+            _ => app.tui.scroll_chat_by(10),
+        },
+
+        // Focus cycling
+        (KeyCode::F(1), _) => {
+            app.tui.focus = match app.tui.focus {
+                Focus::Input => Focus::Chat,
+                Focus::Chat => Focus::ToolLog,
+                Focus::ToolLog => {
+                    if app.tui.sidebar_visible {
+                        Focus::Sidebar
+                    } else {
+                        Focus::Input
+                    }
+                }
+                Focus::Sidebar => Focus::Input,
             };
         }
 
@@ -773,18 +811,20 @@ fn handle_action_queue_keys(app: &mut App, key: KeyCode) {
 fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollUp => match app.tui.active_tab {
-            ActiveTab::Chat => {
-                app.tui.chat_scroll = app.tui.chat_scroll.saturating_sub(3);
-            }
+            ActiveTab::Chat => app.tui.scroll_chat_by(-3),
             ActiveTab::Diff => {
                 app.tui.diff_scroll = app.tui.diff_scroll.saturating_sub(3);
             }
-            _ => {}
+            ActiveTab::Sessions => {}
+            ActiveTab::ActionQueue => {
+                app.tui.action_preview_scroll = app.tui.action_preview_scroll.saturating_sub(3);
+            }
         },
         MouseEventKind::ScrollDown => match app.tui.active_tab {
-            ActiveTab::Chat => app.tui.chat_scroll += 3,
+            ActiveTab::Chat => app.tui.scroll_chat_by(3),
             ActiveTab::Diff => app.tui.diff_scroll += 3,
-            _ => {}
+            ActiveTab::Sessions => {}
+            ActiveTab::ActionQueue => app.tui.action_preview_scroll += 3,
         },
         _ => {}
     }
@@ -794,6 +834,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
 // Command dispatch
 // ─────────────────────────────────────────────────────────────────────────────
 fn submit_input(app: &mut App, input: &str) {
+    app.tui.follow_chat();
     app.tui.add_message(ChatMessage::user(input));
     let _ = app.session_store.append(&app.session_id, &SessionEvent::user(input));
 
