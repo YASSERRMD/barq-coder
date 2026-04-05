@@ -2,12 +2,13 @@
 
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEventKind, KeyModifiers,
+        self, Event, EventStream, KeyCode, KeyEventKind, KeyModifiers,
         MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -924,7 +925,12 @@ async fn main() -> anyhow::Result<()> {
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -940,7 +946,8 @@ async fn main() -> anyhow::Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste
     )?;
 
     if let Err(err) = res {
@@ -1021,115 +1028,104 @@ async fn run_doctor(cli: &Cli) -> anyhow::Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main event loop
+// Main event loop — uses tokio::select! to concurrently handle:
+//   1. Orchestrator events (tokens, tool calls, done, errors)
+//   2. Terminal input (keyboard, mouse, paste, resize)
+//   3. Tick timer (spinner animation, status timeout)
+// This ensures streaming tokens render immediately without blocking on input.
 // ─────────────────────────────────────────────────────────────────────────────
 async fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
 ) -> anyhow::Result<()> {
-    // Spinner / tick interval
-    let tick_rate = Duration::from_millis(120);
+    // Use crossterm's async EventStream so we can select! alongside channels
+    let mut term_events = EventStream::new();
+
+    // Tick interval: 50ms when thinking (20fps for smooth animation),
+    // 120ms when idle (lower CPU usage)
+    let mut tick_interval = tokio::time::interval(Duration::from_millis(50));
+    tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         terminal.draw(|f| tui::draw(f, &mut app.tui))?;
         let mut refresh_metadata = false;
         let mut queued_permissions = Vec::new();
 
-        // ── Orchestrator event drain ──────────────────────────────────────────
-        if let Some(rx) = &mut app.event_rx {
-            while let Ok(event) = rx.try_recv() {
-                match event {
-                    OrchestratorEvent::Token(t) => {
-                        app.tui.is_thinking = true;
-                        app.tui.append_agent_token(&t);
-                    }
-                    OrchestratorEvent::ToolCall { name, args } => {
-                        app.tui.current_tool = Some(name.clone());
-                        let entry = summarize_tool_call(&name, &args);
-                        let log_entry = entry.lines().next().unwrap_or(&entry).to_string();
-                        app.tui.tool_log.push(log_entry);
-                        app.tui.tool_scroll = usize::MAX;
-                        app.tui.add_message(ChatMessage::tool_call(&entry));
-                        let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_call(&name, args.clone()));
-                    }
-                    OrchestratorEvent::ToolResult { name, result } => {
-                        app.tui.current_tool = None;
-                        let entry = summarize_tool_result(&name, &result);
-                        app.tui.tool_log.push(entry.clone());
-                        app.tui.tool_scroll = usize::MAX;
-                        app.tui.add_message(ChatMessage::tool_result(&entry));
-                        let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_result(&name, result.clone()));
+        // ── Select: wait for the FIRST of these to fire ──────────────────────
+        // Take receiver out to avoid borrow conflicts in select!
+        let mut taken_rx = app.event_rx.take();
 
-                        if let Some((file, patch)) = extract_edit_patch(&name, &result) {
-                            app.tui.update_diff(format!("Latest Diff • {}", file), &patch);
-                            let _ = app.session_store.append(&app.session_id, &SessionEvent::edit_applied(&file, &patch));
-                            refresh_metadata = true;
-                        }
-                    }
-                    OrchestratorEvent::PermissionRequested { name, args, reason, tx } => {
-                        app.tui.current_tool = None;
-
-                        if app.skip_permissions {
-                            // Auto-approve immediately
-                            let _ = tx.send(true);
-                            app.tui.tool_log.push(format!("Auto-approved: {} (skip_permissions)", name));
-                            app.tui.tool_scroll = usize::MAX;
-                        } else {
-                            // Pause thinking so user knows we need input
-                            app.tui.is_thinking = false;
-                            queued_permissions.push((name, args, reason, tx));
-                        }
-                    }
-                    OrchestratorEvent::BudgetWarning { used_usd, cap_usd, pct } => {
-                        app.tui.set_status(
-                            format!("⚠ Budget: ${:.4} / ${:.2} ({}%)", used_usd, cap_usd, pct),
-                            false,
-                        );
-                    }
-                    OrchestratorEvent::BudgetPaused { used_usd, cap_usd, tx } => {
-                        app.tui.is_thinking = false;
-                        app.tui.add_message(ChatMessage::system(format!(
-                            "Budget cap reached! Used ${:.4} of ${:.2}.\nPress [Y] to continue anyway or [N] to stop.",
-                            used_usd, cap_usd
-                        )));
-                        app.tui.set_status(
-                            format!("BUDGET CAP: ${:.4} / ${:.2}", used_usd, cap_usd),
-                            true,
-                        );
-                        app.pending_budget_request = Some(tx);
-                    }
-                    OrchestratorEvent::Done(answer) => {
-                        app.tui.is_thinking = false;
-                        app.tui.current_tool = None;
-                        let has_streamed_answer = matches!(
-                            app.tui.messages.last(),
-                            Some(last)
-                                if matches!(last.kind, tui::MessageKind::Agent)
-                                    && last.content == answer
-                        );
-                        if !has_streamed_answer {
-                            app.tui.add_message(ChatMessage::agent(&answer));
-                        }
-                        app.tui.set_status("Done", false);
-                        app.event_rx = None;
-                        let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&answer));
-                        refresh_metadata = true;
-                        break;
-                    }
-                    OrchestratorEvent::Error(err) => {
-                        app.tui.is_thinking = false;
-                        app.tui.current_tool = None;
-                        app.tui.add_message(ChatMessage::error(&err));
-                        app.tui.set_status(format!("Error: {}", err), true);
-                        app.event_rx = None;
-                        let _ = app.session_store.append(&app.session_id, &SessionEvent::error(&err));
-                        refresh_metadata = true;
-                        break;
+        tokio::select! {
+            // Branch 1: Orchestrator event (highest priority when streaming)
+            Some(orch_event) = async {
+                if let Some(rx) = &mut taken_rx {
+                    rx.recv().await
+                } else {
+                    std::future::pending::<Option<OrchestratorEvent>>().await
+                }
+            } => {
+                // Put receiver back before processing
+                app.event_rx = taken_rx;
+                // Process the received event
+                process_orchestrator_event(
+                    app,
+                    orch_event,
+                    &mut refresh_metadata,
+                    &mut queued_permissions,
+                );
+                // Drain any additional buffered events
+                let mut drained = Vec::new();
+                if let Some(rx) = &mut app.event_rx {
+                    while let Ok(ev) = rx.try_recv() {
+                        drained.push(ev);
                     }
                 }
+                for ev in drained {
+                    process_orchestrator_event(
+                        app,
+                        ev,
+                        &mut refresh_metadata,
+                        &mut queued_permissions,
+                    );
+                }
+            }
+
+            // Branch 2: Terminal input event
+            Some(Ok(term_event)) = term_events.next() => {
+                app.event_rx = taken_rx; // restore receiver
+                match term_event {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        handle_key(app, key.code, key.modifiers);
+                    }
+                    Event::Paste(text) => {
+                        if app.pending_permission_requests.is_empty()
+                            && app.pending_budget_request.is_none()
+                        {
+                            if app.tui.active_tab != tui::ActiveTab::Chat {
+                                app.tui.active_tab = tui::ActiveTab::Chat;
+                            }
+                            app.tui.focus = tui::Focus::Input;
+                            app.tui.input_insert_str(&text);
+                            let lc = text.lines().count().max(1);
+                            app.tui.set_status(
+                                format!("Pasted {} lines / {} chars", lc, text.chars().count()),
+                                false,
+                            );
+                        }
+                    }
+                    Event::Mouse(m) => handle_mouse(app, m),
+                    Event::Resize(_, _) => {}
+                    _ => {}
+                }
+            }
+
+            // Branch 3: Tick timer (animation, status timeout)
+            _ = tick_interval.tick() => {
+                app.event_rx = taken_rx; // restore receiver
             }
         }
 
+        // ── Post-select housekeeping ─────────────────────────────────────────
         if refresh_metadata {
             refresh_tui_metadata(app);
         }
@@ -1138,31 +1134,120 @@ async fn run_app<B: ratatui::backend::Backend>(
             queue_permission_request(app, name, args, reason, tx);
         }
 
-        // ── Input events ──────────────────────────────────────────────────────
-        if event::poll(tick_rate)? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    handle_key(app, key.code, key.modifiers);
-                    if app.tui.status_message.is_some() && !matches!(key.code, KeyCode::Esc) {
-                        // clear transient status on next keypress
-                    }
-                }
-                Event::Mouse(m) => handle_mouse(app, m),
-                Event::Resize(_, _) => {}
-                _ => {}
-            }
-        }
-
-        // ── Tick ──────────────────────────────────────────────────────────────
+        // Tick counter for spinners
         app.tui.tick = app.tui.tick.wrapping_add(1);
 
-        if app.tui.status_message.is_some() && app.tui.tick % 25 == 0 {
+        if app.tui.status_message.is_some() && app.tui.tick % 50 == 0 {
             app.tui.clear_status();
         }
 
         // ── Quit ──────────────────────────────────────────────────────────────
         if app.tui.should_quit() {
             return Ok(());
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Process a single orchestrator event
+// ─────────────────────────────────────────────────────────────────────────────
+fn process_orchestrator_event(
+    app: &mut App,
+    event: OrchestratorEvent,
+    refresh_metadata: &mut bool,
+    queued_permissions: &mut Vec<(String, serde_json::Value, String, tokio::sync::oneshot::Sender<bool>)>,
+) {
+    match event {
+        OrchestratorEvent::Token(t) => {
+            app.tui.is_thinking = true;
+            app.tui.append_agent_token(&t);
+        }
+        OrchestratorEvent::ToolCall { name, args } => {
+            app.tui.current_tool = Some(name.clone());
+            let entry = summarize_tool_call(&name, &args);
+            let log_entry = entry.lines().next().unwrap_or(&entry).to_string();
+            app.tui.tool_log.push(log_entry);
+            app.tui.tool_scroll = usize::MAX;
+            app.tui.add_message(ChatMessage::tool_call(&entry));
+            let _ = app.session_store.append(
+                &app.session_id,
+                &SessionEvent::tool_call(&name, args.clone()),
+            );
+        }
+        OrchestratorEvent::ToolResult { name, result } => {
+            app.tui.current_tool = None;
+            let entry = summarize_tool_result(&name, &result);
+            app.tui.tool_log.push(entry.clone());
+            app.tui.tool_scroll = usize::MAX;
+            app.tui.add_message(ChatMessage::tool_result(&entry));
+            let _ = app.session_store.append(
+                &app.session_id,
+                &SessionEvent::tool_result(&name, result.clone()),
+            );
+
+            if let Some((file, patch)) = extract_edit_patch(&name, &result) {
+                app.tui.update_diff(format!("Latest Diff \u{2022} {}", file), &patch);
+                let _ = app.session_store.append(
+                    &app.session_id,
+                    &SessionEvent::edit_applied(&file, &patch),
+                );
+                *refresh_metadata = true;
+            }
+        }
+        OrchestratorEvent::PermissionRequested { name, args, reason, tx } => {
+            app.tui.current_tool = None;
+            if app.skip_permissions {
+                let _ = tx.send(true);
+                app.tui.tool_log.push(format!("Auto-approved: {} (skip_permissions)", name));
+                app.tui.tool_scroll = usize::MAX;
+            } else {
+                app.tui.is_thinking = false;
+                queued_permissions.push((name, args, reason, tx));
+            }
+        }
+        OrchestratorEvent::BudgetWarning { used_usd, cap_usd, pct } => {
+            app.tui.set_status(
+                format!("\u{26A0} Budget: ${:.4} / ${:.2} ({}%)", used_usd, cap_usd, pct),
+                false,
+            );
+        }
+        OrchestratorEvent::BudgetPaused { used_usd, cap_usd, tx } => {
+            app.tui.is_thinking = false;
+            app.tui.add_message(ChatMessage::system(format!(
+                "Budget cap reached! Used ${:.4} of ${:.2}.\nPress [Y] to continue anyway or [N] to stop.",
+                used_usd, cap_usd
+            )));
+            app.tui.set_status(
+                format!("BUDGET CAP: ${:.4} / ${:.2}", used_usd, cap_usd),
+                true,
+            );
+            app.pending_budget_request = Some(tx);
+        }
+        OrchestratorEvent::Done(answer) => {
+            app.tui.is_thinking = false;
+            app.tui.current_tool = None;
+            let has_streamed = matches!(
+                app.tui.messages.last(),
+                Some(last)
+                    if matches!(last.kind, tui::MessageKind::Agent)
+                        && last.content == answer
+            );
+            if !has_streamed {
+                app.tui.add_message(ChatMessage::agent(&answer));
+            }
+            app.tui.set_status("Done", false);
+            app.event_rx = None;
+            let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&answer));
+            *refresh_metadata = true;
+        }
+        OrchestratorEvent::Error(err) => {
+            app.tui.is_thinking = false;
+            app.tui.current_tool = None;
+            app.tui.add_message(ChatMessage::error(&err));
+            app.tui.set_status(format!("Error: {}", err), true);
+            app.event_rx = None;
+            let _ = app.session_store.append(&app.session_id, &SessionEvent::error(&err));
+            *refresh_metadata = true;
         }
     }
 }
