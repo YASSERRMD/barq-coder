@@ -1354,6 +1354,36 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, mods: KeyModifiers) {
             app.tui.input_move_word_right();
         }
 
+        // Ctrl+U → clear line
+        (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_clear_line();
+        }
+
+        // Ctrl+K → kill to end of line
+        (KeyCode::Char('k'), m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_kill_to_end();
+        }
+
+        // Ctrl+A → move to beginning
+        (KeyCode::Char('a'), m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_home();
+        }
+
+        // Ctrl+E → move to end
+        (KeyCode::Char('e'), m) if m.contains(KeyModifiers::CONTROL) => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_end();
+        }
+
+        // Delete key → forward delete
+        (KeyCode::Delete, _) => {
+            app.tui.focus = Focus::Input;
+            app.tui.input_delete_forward();
+        }
+
         // Character input
         (KeyCode::Char(c), _) => {
             app.tui.focus = Focus::Input;
@@ -1626,6 +1656,27 @@ fn submit_input(app: &mut App, input: &str) {
         app.tui.add_message(ChatMessage::system("Session cleared."));
     } else if input == "/help" {
         app.tui.add_message(ChatMessage::system(HELP_TEXT));
+    } else if input == "/status" {
+        let status = format!(
+            "Model: {}\nTokens: {}/{} ({:.0}%)\nSession: {}\nMessages: {}\nTool log entries: {}",
+            app.config.ollama_model,
+            app.tui.token_count,
+            app.tui.token_limit,
+            if app.tui.token_limit > 0 {
+                app.tui.token_count as f64 / app.tui.token_limit as f64 * 100.0
+            } else {
+                0.0
+            },
+            app.session_id,
+            app.tui.messages.len(),
+            app.tui.tool_log.len(),
+        );
+        app.tui.add_message(ChatMessage::system(status));
+    } else if input == "/doctor" {
+        app.tui.add_message(ChatMessage::system(format!(
+            "Checking Ollama at {}...",
+            app.config.ollama_base_url
+        )));
     } else if input.starts_with("/goal ") {
         let goal_text = input["/goal ".len()..].to_string();
         app.tui.is_thinking = true;
