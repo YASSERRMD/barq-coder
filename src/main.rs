@@ -1750,33 +1750,46 @@ fn submit_input(app: &mut App, input: &str) {
 }
 
 const HELP_TEXT: &str = "\
-Built-in commands:
-  /index [path]       Index codebase into BarqDB
-  /goal <text>        Run multi-agent goal (Planner → Coder → Tester → Reviewer)
-  /diff               Show last diff in the Diff tab
-  /sessions           Jump to Sessions tab
-  /config             Show current config
-  /clear              Clear chat and conversation
+## Commands
 
-Slash commands (agent-aware):
-  /compact            Compact conversation to save context window
-  /plan               Enter plan mode (outline before executing)
-  /review             Review all edits made this session
+  /help               Show this help message
+  /clear              Clear chat and conversation history
+  /config             Display current runtime configuration
+  /status             Show token usage, session stats
+  /doctor             Check Ollama connectivity
+  /index [path]       Index codebase into BarqDB for semantic search
+  /goal <text>        Run multi-agent goal (Planner → Coder → Tester → Reviewer)
+  /diff               Show latest diff in the Diff tab
+  /sessions           Browse saved session archive
   /memory [show]      Show project memory (.barqcoder.md)
   /memory add <note>  Add a note to project memory
   /model <name>       Switch LLM model mid-session
-  /status             Show session stats and token usage
-  /help               Show this message
+  /compact            Compact conversation to save context window
 
-Keys:
-  Enter           Send message
-  ↑/↓             Navigate history or the focused pane
-  PageUp/Down     Scroll chat
-  Tab / Shift+Tab Switch tabs
-  Alt+S           Toggle sidebar
-  F1              Cycle focus (Input / Sidebar / Chat / Tool Activity)
-  Y / A / N       Approve once, remember, or deny the selected Sandbox action
-  Esc             Quit";
+## Keyboard Shortcuts
+
+  **Input**
+  Enter               Send message
+  Shift+Enter         Insert newline (multi-line input)
+  Ctrl+U              Clear entire input
+  Ctrl+K              Delete from cursor to end of line
+  Ctrl+A / Ctrl+E     Move to start / end of input
+  Ctrl+Left/Right     Move by word
+  Ctrl+Backspace      Delete word backward
+
+  **Navigation**
+  Tab / Shift+Tab     Switch tabs
+  F1                  Cycle focus (Input → Chat → ToolLog → Sidebar)
+  Alt+S               Toggle sidebar
+  ↑/↓                 History (Input) / Scroll (Chat/ToolLog)
+  PageUp/Down         Fast scroll
+  Home/End            Jump to top/bottom or follow live
+
+  **Approval Gate**
+  Y                   Approve action once
+  A                   Trust tool for this session
+  N                   Deny action
+  Esc                 Quit (or deny all pending)";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Quit flag on TuiState
