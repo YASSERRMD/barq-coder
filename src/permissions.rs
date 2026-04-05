@@ -1,15 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use crate::tools::{CommandRisk, PermissionResult};
 
 /// Permission scope tracks auto-allowed tools and paths.
 /// Inspired by Claude Code's auto-approval system.
 pub struct PermissionManager {
     workspace_root: PathBuf,
-    auto_allowed_tools: HashSet<String>,
-    always_deny_tools: HashSet<String>,
-    always_ask_tools: HashSet<String>,
-    allowed_dirs: HashSet<PathBuf>,
+    auto_allowed_tools: RwLock<HashSet<String>>,
+    always_deny_tools: RwLock<HashSet<String>>,
+    always_ask_tools: RwLock<HashSet<String>>,
+    allowed_dirs: RwLock<HashSet<PathBuf>>,
     blocked_dirs: HashSet<PathBuf>,
     blocked_command_patterns: Vec<String>,
 }
@@ -34,24 +35,29 @@ impl PermissionManager {
         
         Self {
             workspace_root: root,
-            auto_allowed_tools: HashSet::new(),
-            always_deny_tools: HashSet::new(),
-            always_ask_tools: HashSet::new(),
-            allowed_dirs: HashSet::new(),
+            auto_allowed_tools: RwLock::new(HashSet::new()),
+            always_deny_tools: RwLock::new(HashSet::new()),
+            always_ask_tools: RwLock::new(HashSet::new()),
+            allowed_dirs: RwLock::new(HashSet::new()),
             blocked_dirs: blocked,
             blocked_command_patterns: blocked_patterns,
         }
     }
 
     /// Whitelist a specific tool or command for auto-execution
-    pub fn auto_allow_tool(&mut self, tool_name: &str) {
-        self.auto_allowed_tools.insert(tool_name.to_string());
+    pub fn auto_allow_tool(&self, tool_name: &str) {
+        let mut allowed = self
+            .auto_allowed_tools
+            .write()
+            .expect("permission lock poisoned");
+        allowed.insert(tool_name.to_string());
     }
 
     /// Whitelist a specific directory
-    pub fn allow_directory(&mut self, dir: &str) {
+    pub fn allow_directory(&self, dir: &str) {
         if let Ok(p) = Path::new(dir).canonicalize() {
-            self.allowed_dirs.insert(p);
+            let mut dirs = self.allowed_dirs.write().expect("permission lock poisoned");
+            dirs.insert(p);
         }
     }
 
@@ -82,7 +88,8 @@ impl PermissionManager {
         }
 
         // 3. Fallback to explicitly allowed directories
-        for allowed in &self.allowed_dirs {
+        let allowed_dirs = self.allowed_dirs.read().expect("permission lock poisoned");
+        for allowed in allowed_dirs.iter() {
             if canonical.starts_with(allowed) {
                 return PermissionResult::Allow;
             }
@@ -121,16 +128,31 @@ impl PermissionManager {
             return tool_specific_result;
         }
 
-        if self.always_deny_tools.contains(tool_name) {
+        if self
+            .always_deny_tools
+            .read()
+            .expect("permission lock poisoned")
+            .contains(tool_name)
+        {
             return PermissionResult::Deny(format!("Tool {} is blacklisted by always_deny_tools", tool_name));
         }
 
-        if self.always_ask_tools.contains(tool_name) {
+        if self
+            .always_ask_tools
+            .read()
+            .expect("permission lock poisoned")
+            .contains(tool_name)
+        {
             return PermissionResult::Ask(format!("Tool {} is configured to always ask", tool_name));
         }
 
         // If the tool says allow, we still check our internal policies
-        if self.auto_allowed_tools.contains(tool_name) {
+        if self
+            .auto_allowed_tools
+            .read()
+            .expect("permission lock poisoned")
+            .contains(tool_name)
+        {
             return PermissionResult::Allow;
         }
 
@@ -143,5 +165,27 @@ impl PermissionManager {
         }
 
         PermissionResult::Allow
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PermissionManager;
+    use crate::tools::{CommandRisk, PermissionResult};
+    use serde_json::json;
+
+    #[test]
+    fn auto_allowed_tool_is_respected() {
+        let manager = PermissionManager::new(".");
+        manager.auto_allow_tool("edit_file");
+
+        let result = manager.check_tool_call(
+            "edit_file",
+            CommandRisk::Destructive,
+            PermissionResult::Allow,
+            &json!({ "file_path": "src/main.rs" }),
+        );
+
+        assert!(matches!(result, PermissionResult::Allow));
     }
 }

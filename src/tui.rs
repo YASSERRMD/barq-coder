@@ -238,6 +238,14 @@ pub struct SessionEntry {
     pub workspace: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct PermissionPrompt {
+    pub title: String,
+    pub reason: String,
+    pub hint: String,
+    pub queue_len: usize,
+}
+
 pub struct TuiState {
     pub active_tab: ActiveTab,
     pub focus: Focus,
@@ -260,6 +268,7 @@ pub struct TuiState {
     pub action_queue: Vec<PendingAction>,
     pub action_queue_selected: usize,
     pub action_preview_scroll: usize,
+    pub permission_prompt: Option<PermissionPrompt>,
     pub sessions: Vec<SessionEntry>,
     pub session_list_state: ListState,
     pub is_thinking: bool,
@@ -306,6 +315,7 @@ impl TuiState {
             action_queue: Vec::new(),
             action_queue_selected: 0,
             action_preview_scroll: 0,
+            permission_prompt: None,
             sessions: Vec::new(),
             session_list_state,
             is_thinking: false,
@@ -496,6 +506,10 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
     draw_header(f, outer[0], state);
     draw_body(f, outer[1], state);
     draw_footer(f, outer[2], state);
+
+    if let Some(prompt) = &state.permission_prompt {
+        draw_permission_prompt(f, prompt);
+    }
 }
 
 fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
@@ -1056,13 +1070,47 @@ fn draw_footer(f: &mut Frame, area: Rect, state: &TuiState) {
         ActiveTab::Chat => "Enter send  Up/Down history  F1 focus  Tab next tab  Shift+Tab prev tab  Alt+S toggle sidebar  Esc quit",
         ActiveTab::Diff => "Up/Down scroll  PageUp/PageDown fast scroll  Home/End jump  Tab switch tabs  Esc quit",
         ActiveTab::Sessions => "Up/Down select  Enter replay session  Tab switch tabs  Esc quit",
-        ActiveTab::ActionQueue => "Up/Down select  PageUp/PageDown preview scroll  Y approve  N deny  Esc deny all or quit",
+        ActiveTab::ActionQueue => "Up/Down select  PageUp/PageDown preview scroll  Y approve once  A allow this tool  N deny  Esc deny all or quit",
     };
 
     let footer = Paragraph::new(Span::styled(content, Style::default().fg(Palette::TEXT_DIM)))
         .alignment(Alignment::Left)
         .style(Style::default().bg(Palette::BG));
     f.render_widget(footer, area);
+}
+
+fn draw_permission_prompt(f: &mut Frame, prompt: &PermissionPrompt) {
+    let area = centered_rect(68, 10, f.area());
+    let widget = Paragraph::new(vec![
+        Line::from(Span::styled(
+            prompt.title.as_str(),
+            Style::default().fg(Palette::TEXT).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(prompt.reason.as_str(), Style::default().fg(Palette::TEXT))),
+        Line::raw(""),
+        Line::from(Span::styled(
+            prompt.hint.as_str(),
+            Style::default().fg(Palette::WARNING).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("Queued approvals: {}", prompt.queue_len),
+            Style::default().fg(Palette::TEXT_DIM),
+        )),
+    ])
+    .block(
+        Block::default()
+            .title(" Permission Required ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Palette::BORDER_ACTIVE))
+            .style(Style::default().bg(Palette::PANEL_ALT))
+            .padding(Padding::horizontal(1)),
+    )
+    .wrap(Wrap { trim: true });
+
+    f.render_widget(Clear, area);
+    f.render_widget(widget, area);
 }
 
 fn panel_block(title: &str, focused: bool) -> Block<'_> {
@@ -1160,5 +1208,16 @@ fn status_color(state: &TuiState) -> Color {
         Palette::BRAND
     } else {
         Palette::SUCCESS
+    }
+}
+
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let popup_width = area.width.saturating_mul(percent_x).saturating_div(100);
+    let popup_height = height.min(area.height.saturating_sub(2));
+    Rect {
+        x: area.x + area.width.saturating_sub(popup_width) / 2,
+        y: area.y + area.height.saturating_sub(popup_height) / 2,
+        width: popup_width.max(1),
+        height: popup_height.max(1),
     }
 }
