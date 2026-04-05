@@ -512,6 +512,35 @@ impl TuiState {
         self.input_cursor = self.input.len();
     }
 
+    /// Delete character forward (Delete key).
+    pub fn input_delete_forward(&mut self) {
+        if self.input_cursor < self.input.len() {
+            let ch_len = self.input[self.input_cursor..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            self.input.drain(self.input_cursor..self.input_cursor + ch_len);
+        }
+    }
+
+    /// Clear entire input (Ctrl+U).
+    pub fn input_clear_line(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+        self.autocomplete_idx = 0;
+    }
+
+    /// Delete from cursor to end of line (Ctrl+K).
+    pub fn input_kill_to_end(&mut self) {
+        self.input.truncate(self.input_cursor);
+    }
+
+    /// Select all text and clear (Ctrl+A behavior — move to start).
+    pub fn input_select_all(&mut self) {
+        self.input_cursor = 0;
+    }
+
     pub fn history_prev(&mut self) {
         if self.input_history.is_empty() {
             return;
@@ -557,12 +586,16 @@ impl TuiState {
     /// The canonical list of slash commands for autocomplete.
     pub fn slash_commands() -> &'static [(&'static str, &'static str)] {
         &[
-            ("/help",     "Show help message"),
-            ("/clear",    "Clear conversation"),
-            ("/config",   "Display current config"),
-            ("/goal",     "Start a multi-agent goal"),
-            ("/diff",     "Show active diff patch"),
-            ("/sessions", "Switch to sessions tab"),
+            ("/help",     "Show help & keybindings"),
+            ("/clear",    "Clear conversation history"),
+            ("/config",   "Display runtime config"),
+            ("/goal",     "Run multi-agent goal plan"),
+            ("/diff",     "Show latest diff patch"),
+            ("/sessions", "Browse session archive"),
+            ("/memory",   "View/add project memory"),
+            ("/doctor",   "Check Ollama connectivity"),
+            ("/index",    "Index workspace into BarqDB"),
+            ("/status",   "Show token usage & budget"),
         ]
     }
 
@@ -1782,8 +1815,9 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
             ("↑/↓", "Move"),
             ("F1", "Focus"),
             ("Tab", "Next Tab"),
-            ("Alt+S", "Toggle Sidebar"),
-            ("PgUp/Dn", "Scroll"),
+            ("Alt+S", "Sidebar"),
+            ("^U", "Clear"),
+            ("^K", "Kill Line"),
             ("Esc", "Quit"),
         ],
         ActiveTab::Diff => &[
