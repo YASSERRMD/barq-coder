@@ -633,7 +633,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
         ]),
         Line::from(vec![
             Span::styled("F1", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
-            Span::styled(" cycle focus", Style::default().fg(Palette::TEXT)),
+            Span::styled(" cycle panes", Style::default().fg(Palette::TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("Paste", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
+            Span::styled(" insert large prompts", Style::default().fg(Palette::TEXT)),
         ]),
     ];
 
@@ -1079,7 +1083,7 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
 fn draw_footer(f: &mut Frame, area: Rect, state: &TuiState) {
     let content = match state.active_tab {
-        ActiveTab::Chat => "Enter send  Up/Down history  F1 focus  Tab next tab  Shift+Tab prev tab  Alt+S toggle sidebar  Esc quit",
+        ActiveTab::Chat => "Type or paste prompt  Enter send  F1 cycle panes  Up/Down or PgUp/PgDn use focused pane  Tab switch tabs  Esc quit",
         ActiveTab::Diff => "Up/Down scroll  PageUp/PageDown fast scroll  Home/End jump  Tab switch tabs  Esc quit",
         ActiveTab::Sessions => "Up/Down select  Enter replay session  Tab switch tabs  Esc quit",
         ActiveTab::ActionQueue => "Up/Down select  PageUp/PageDown preview scroll  Y approve once  A allow this tool  N deny  Esc deny all or quit",
