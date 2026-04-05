@@ -369,6 +369,13 @@ impl TuiState {
         self.autocomplete_idx = 0;
     }
 
+    pub fn input_insert_str(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.input.insert_str(self.input_cursor, &normalized);
+        self.input_cursor += normalized.len();
+        self.autocomplete_idx = 0;
+    }
+
     pub fn input_delete_back(&mut self) {
         if self.input_cursor > 0 {
             let c_start = self
