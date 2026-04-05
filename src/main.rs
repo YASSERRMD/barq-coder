@@ -66,6 +66,7 @@ struct App {
     pending_budget_request: Option<tokio::sync::oneshot::Sender<bool>>,
     cost: CostTracker,
     skip_permissions: bool,
+    streaming_assistant_raw: String,
 }
 
 struct PendingPermissionRequest {
@@ -186,6 +187,132 @@ fn format_tool_summary(title: impl Into<String>, details: Vec<String>) -> String
         lines.push(format!("  {}", detail));
     }
     lines.join("\n")
+}
+
+fn strip_fenced_block(text: &str) -> &str {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed;
+    }
+
+    let Some(first_newline) = trimmed.find('\n') else {
+        return trimmed;
+    };
+    let body = &trimmed[first_newline + 1..];
+    body.strip_suffix("```").unwrap_or(body).trim()
+}
+
+fn extract_preferred_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => {
+            let cleaned = text.trim();
+            (!cleaned.is_empty()).then(|| cleaned.to_string())
+        }
+        serde_json::Value::Object(map) => {
+            for key in ["final_answer", "answer", "content", "message", "reasoning"] {
+                if let Some(text) = map.get(key).and_then(extract_preferred_text) {
+                    if !text.trim().is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(items) => {
+            let pieces = items
+                .iter()
+                .filter_map(extract_preferred_text)
+                .collect::<Vec<_>>();
+            if pieces.is_empty() {
+                None
+            } else {
+                Some(pieces.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_json_string_field(raw: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{}\"", field);
+    let start = raw.find(&needle)?;
+    let after_field = &raw[start + needle.len()..];
+    let colon = after_field.find(':')?;
+    let mut chars = after_field[colon + 1..].trim_start().chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+
+    let mut extracted = String::new();
+    let mut escaped = false;
+    for ch in chars {
+        if escaped {
+            extracted.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(extracted),
+            other => extracted.push(other),
+        }
+    }
+
+    (!extracted.trim().is_empty()).then_some(extracted)
+}
+
+fn sanitize_assistant_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let unfenced = strip_fenced_block(trimmed);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(unfenced) {
+        if let Some(text) = extract_preferred_text(&value) {
+            return text;
+        }
+    }
+
+    for field in ["final_answer", "answer", "content", "message", "reasoning"] {
+        if let Some(text) = extract_json_string_field(unfenced, field) {
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+    }
+
+    let looks_structured = unfenced.starts_with('{')
+        || unfenced.starts_with('[')
+        || trimmed.starts_with("```json")
+        || trimmed.starts_with("```JSON");
+
+    if looks_structured {
+        String::new()
+    } else {
+        raw.to_string()
+    }
+}
+
+fn set_agent_transcript_message(tui: &mut TuiState, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    match tui.messages.last_mut() {
+        Some(last) if matches!(last.kind, tui::MessageKind::Agent) => {
+            last.content = text.to_string();
+        }
+        _ => tui.add_message(ChatMessage::agent(text)),
+    }
 }
 
 fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
@@ -615,6 +742,7 @@ impl App {
             pending_budget_request: None,
             cost: CostTracker::new(),
             skip_permissions: cli.dangerously_skip_permissions,
+            streaming_assistant_raw: String::new(),
         }
     }
 
@@ -626,7 +754,12 @@ impl App {
                     self.tui.add_message(ChatMessage::user(&content));
                 }
                 SessionEvent::AssistantMessage { content, .. } => {
-                    self.tui.add_message(ChatMessage::agent(&content));
+                    let rendered = sanitize_assistant_text(&content);
+                    if rendered.trim().is_empty() {
+                        self.tui.add_message(ChatMessage::agent(&content));
+                    } else {
+                        self.tui.add_message(ChatMessage::agent(rendered));
+                    }
                 }
                 SessionEvent::ToolCall { name, args, .. } => {
                     self.tui
@@ -850,7 +983,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                 match event {
                     OrchestratorEvent::Token(t) => {
                         app.tui.is_thinking = true;
-                        app.tui.append_agent_token(&t);
+                        app.streaming_assistant_raw.push_str(&t);
+                        let rendered = sanitize_assistant_text(&app.streaming_assistant_raw);
+                        if !rendered.trim().is_empty() {
+                            set_agent_transcript_message(&mut app.tui, &rendered);
+                        }
                     }
                     OrchestratorEvent::ToolCall { name, args } => {
                         app.tui.current_tool = Some(name.clone());
@@ -900,18 +1037,27 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::Done(answer) => {
                         app.tui.is_thinking = false;
                         app.tui.current_tool = None;
+                        let rendered = sanitize_assistant_text(&answer);
+                        let answer_for_ui = if rendered.trim().is_empty() {
+                            answer.clone()
+                        } else {
+                            rendered
+                        };
                         let already_streamed = matches!(
                             app.tui.messages.last(),
                             Some(last)
                                 if matches!(last.kind, tui::MessageKind::Agent)
-                                    && last.content == answer
+                                    && last.content == answer_for_ui
                         );
                         if !already_streamed {
-                            app.tui.add_message(ChatMessage::agent(&answer));
+                            app.tui.add_message(ChatMessage::agent(&answer_for_ui));
                         }
                         app.tui.set_status("Done", false);
                         app.event_rx = None;
-                        let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&answer));
+                        let _ = app
+                            .session_store
+                            .append(&app.session_id, &SessionEvent::assistant(&answer_for_ui));
+                        app.streaming_assistant_raw.clear();
                         break;
                     }
                     OrchestratorEvent::Error(err) => {
@@ -920,6 +1066,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                         app.tui.add_message(ChatMessage::error(&err));
                         app.tui.set_status(format!("Error: {}", err), true);
                         app.event_rx = None;
+                        app.streaming_assistant_raw.clear();
                         break;
                     }
                 }
@@ -1252,7 +1399,12 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                                 app.tui.add_message(ChatMessage::user(&content));
                             }
                             SessionEvent::AssistantMessage { content, .. } => {
-                                app.tui.append_agent_token(&content);
+                                let rendered = sanitize_assistant_text(&content);
+                                if rendered.trim().is_empty() {
+                                    app.tui.add_message(ChatMessage::agent(&content));
+                                } else {
+                                    app.tui.add_message(ChatMessage::agent(rendered));
+                                }
                             }
                             SessionEvent::ToolCall { name, args, .. } => {
                                 app.tui.add_message(ChatMessage::tool_call(summarize_tool_call(
@@ -1387,6 +1539,7 @@ fn move_sidebar_selection(state: &mut ratatui::widgets::ListState, len: usize, d
 fn submit_input(app: &mut App, input: &str) {
     app.tui.follow_chat();
     app.tui.add_message(ChatMessage::user(input));
+    app.streaming_assistant_raw.clear();
     let _ = app.session_store.append(&app.session_id, &SessionEvent::user(input));
 
     if input.starts_with("/index") {
@@ -1413,6 +1566,7 @@ fn submit_input(app: &mut App, input: &str) {
         app.tui.messages.clear();
         app.tui.tool_log.clear();
         app.orchestrator.conversation.clear();
+        app.streaming_assistant_raw.clear();
         app.tui.add_message(ChatMessage::system("Session cleared."));
     } else if input == "/help" {
         app.tui.add_message(ChatMessage::system(HELP_TEXT));
@@ -1526,7 +1680,7 @@ impl TuiState {
 
 #[cfg(test)]
 mod tests {
-    use super::{summarize_tool_call, summarize_tool_result};
+    use super::{sanitize_assistant_text, summarize_tool_call, summarize_tool_result};
     use serde_json::json;
 
     #[test]
@@ -1576,6 +1730,31 @@ mod tests {
         assert!(summary.contains("query:"));
         assert!(summary.contains("paths:"));
         assert!(!summary.contains("{\"query\""));
+    }
+
+    #[test]
+    fn sanitize_assistant_text_extracts_final_answer_from_json_wrapper() {
+        let rendered = sanitize_assistant_text(
+            r#"{"reasoning":"Need to inspect the project first.","tool_calls":[],"final_answer":"I found the failing test and fixed the parser."}"#,
+        );
+
+        assert_eq!(rendered, "I found the failing test and fixed the parser.");
+    }
+
+    #[test]
+    fn sanitize_assistant_text_extracts_partial_streamed_final_answer() {
+        let rendered = sanitize_assistant_text(
+            r#"{"reasoning":"Inspecting files","final_answer":"I fixed the conversation renderer"#,
+        );
+
+        assert_eq!(rendered, "I fixed the conversation renderer");
+    }
+
+    #[test]
+    fn sanitize_assistant_text_leaves_plain_text_unchanged() {
+        let rendered = sanitize_assistant_text("I updated the TUI to use a right-side operations rail.");
+
+        assert_eq!(rendered, "I updated the TUI to use a right-side operations rail.");
     }
 }
 
