@@ -12,27 +12,27 @@ use ratatui::{
 pub struct Palette;
 
 impl Palette {
-    pub const BG: Color = Color::Rgb(14, 18, 24);
-    pub const PANEL: Color = Color::Rgb(23, 28, 36);
-    pub const PANEL_ALT: Color = Color::Rgb(29, 35, 44);
-    pub const PANEL_MUTED: Color = Color::Rgb(33, 41, 52);
-    pub const BORDER: Color = Color::Rgb(74, 86, 102);
-    pub const BORDER_ACTIVE: Color = Color::Rgb(94, 164, 255);
-    pub const TEXT: Color = Color::Rgb(229, 235, 242);
-    pub const TEXT_DIM: Color = Color::Rgb(150, 161, 174);
-    pub const TEXT_MUTED: Color = Color::Rgb(117, 128, 141);
-    pub const BRAND: Color = Color::Rgb(94, 164, 255);
-    pub const USER: Color = Color::Rgb(92, 214, 163);
-    pub const AGENT: Color = Color::Rgb(255, 219, 102);
-    pub const TOOL: Color = Color::Rgb(147, 197, 253);
-    pub const RESULT: Color = Color::Rgb(244, 162, 97);
-    pub const ERROR: Color = Color::Rgb(255, 107, 107);
-    pub const SUCCESS: Color = Color::Rgb(80, 200, 120);
-    pub const WARNING: Color = Color::Rgb(255, 201, 107);
-    pub const DIFF_ADD: Color = Color::Rgb(109, 208, 130);
-    pub const DIFF_DEL: Color = Color::Rgb(255, 120, 120);
-    pub const DIFF_HUNK: Color = Color::Rgb(132, 196, 255);
-    pub const KEY: Color = Color::Rgb(110, 123, 140);
+    pub const BG: Color = Color::Rgb(18, 15, 12);
+    pub const PANEL: Color = Color::Rgb(29, 24, 19);
+    pub const PANEL_ALT: Color = Color::Rgb(38, 31, 25);
+    pub const PANEL_MUTED: Color = Color::Rgb(49, 40, 32);
+    pub const BORDER: Color = Color::Rgb(111, 91, 72);
+    pub const BORDER_ACTIVE: Color = Color::Rgb(228, 177, 102);
+    pub const TEXT: Color = Color::Rgb(245, 236, 220);
+    pub const TEXT_DIM: Color = Color::Rgb(191, 173, 151);
+    pub const TEXT_MUTED: Color = Color::Rgb(149, 130, 111);
+    pub const BRAND: Color = Color::Rgb(228, 177, 102);
+    pub const USER: Color = Color::Rgb(141, 204, 160);
+    pub const AGENT: Color = Color::Rgb(246, 212, 124);
+    pub const TOOL: Color = Color::Rgb(123, 181, 235);
+    pub const RESULT: Color = Color::Rgb(232, 154, 94);
+    pub const ERROR: Color = Color::Rgb(240, 116, 116);
+    pub const SUCCESS: Color = Color::Rgb(118, 193, 138);
+    pub const WARNING: Color = Color::Rgb(244, 198, 104);
+    pub const DIFF_ADD: Color = Color::Rgb(126, 206, 115);
+    pub const DIFF_DEL: Color = Color::Rgb(239, 121, 121);
+    pub const DIFF_HUNK: Color = Color::Rgb(124, 181, 235);
+    pub const KEY: Color = Color::Rgb(172, 143, 112);
 }
 
 const SPINNER_FRAMES: &[&str] = &["-", "\\", "|", "/"];
@@ -299,7 +299,7 @@ impl TuiState {
             active_tab: ActiveTab::Chat,
             focus: Focus::Input,
             messages: vec![ChatMessage::system(
-                "Welcome to BarqCoder. Type a prompt or /help to see commands.",
+                "BarqCoder deck online. Ask for a change, a review, or a command run.",
             )],
             chat_scroll: usize::MAX,
             chat_follow: true,
@@ -574,7 +574,7 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([Constraint::Length(5), Constraint::Min(0), Constraint::Length(2)])
         .split(f.area());
 
     draw_header(f, outer[0], state);
@@ -589,35 +589,89 @@ pub fn draw(f: &mut Frame, state: &mut TuiState) {
 fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Length(3)])
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(3)])
         .split(area);
 
     let headline = Line::from(vec![
-        Span::styled("BarqCoder", Style::default().fg(Palette::BRAND).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("  model={}  session={}  ", state.current_model, trim_chars(&state.session_id, 24)),
-            Style::default().fg(Palette::TEXT_DIM),
+            "BARQCODER // COMMAND DECK",
+            Style::default().fg(Palette::BRAND).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(status_label(state), Style::default().fg(status_color(state)).add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(
-            state.status_message.as_deref().unwrap_or(""),
-            Style::default().fg(if state.status_is_error { Palette::ERROR } else { Palette::TEXT_MUTED }),
+            format!(
+                "model={}  session={}",
+                state.current_model,
+                trim_chars(&state.session_id, 24)
+            ),
+            Style::default().fg(Palette::TEXT_DIM),
         ),
     ]);
 
     f.render_widget(Paragraph::new(headline), rows[0]);
 
+    let mut chips = vec![
+        chip(
+            format!("focus {}", focus_label(state.focus)),
+            Palette::BG,
+            Palette::BRAND,
+        ),
+        Span::raw(" "),
+        chip(status_label(state), status_color(state), Palette::PANEL_MUTED),
+        Span::raw(" "),
+        chip(
+            format!("transcript {}", if state.chat_follow { "live" } else { "history" }),
+            Palette::TEXT,
+            Palette::PANEL_MUTED,
+        ),
+        Span::raw(" "),
+        chip(
+            format!("approvals {}", state.action_queue.len()),
+            if state.action_queue.is_empty() {
+                Palette::TEXT
+            } else {
+                Palette::WARNING
+            },
+            Palette::PANEL_MUTED,
+        ),
+        Span::raw(" "),
+        chip(
+            format!("messages {}", state.messages.len()),
+            Palette::TEXT,
+            Palette::PANEL_MUTED,
+        ),
+        Span::raw(" "),
+        chip(
+            format!("rail {}", if state.sidebar_visible { "open" } else { "hidden" }),
+            Palette::TEXT,
+            Palette::PANEL_MUTED,
+        ),
+    ];
+
+    if let Some(message) = state.status_message.as_deref().filter(|message| !message.is_empty()) {
+        chips.push(Span::raw("  "));
+        chips.push(Span::styled(
+            trim_chars(message, 72),
+            Style::default().fg(if state.status_is_error {
+                Palette::ERROR
+            } else {
+                Palette::TEXT_MUTED
+            }),
+        ));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(chips)), rows[1]);
+
     let tabs = Tabs::new(vec![
-        Line::from(" Chat "),
-        Line::from(" Diff "),
-        Line::from(" Sessions "),
-        Line::from(format!(" Approvals [{}] ", state.action_queue.len())),
+        Line::from(" Console "),
+        Line::from(" Patch Deck "),
+        Line::from(" Session Log "),
+        Line::from(format!(" Gate [{}] ", state.action_queue.len())),
     ])
     .select(state.active_tab as usize)
     .block(
         Block::default()
-            .borders(Borders::TOP | Borders::BOTTOM)
+            .borders(Borders::ALL)
             .border_style(Style::default().fg(Palette::BORDER))
             .style(Style::default().bg(Palette::PANEL)),
     )
@@ -629,7 +683,7 @@ fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
     )
     .divider(Span::styled(" ", Style::default().fg(Palette::TEXT_DIM)));
 
-    f.render_widget(tabs, rows[1]);
+    f.render_widget(tabs, rows[2]);
 }
 
 fn draw_body(f: &mut Frame, area: Rect, state: &mut TuiState) {
@@ -645,79 +699,119 @@ fn draw_chat_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let columns = if state.sidebar_visible {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(30), Constraint::Min(0)])
+            .constraints([Constraint::Min(0), Constraint::Length(36)])
             .split(area)
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(0), Constraint::Min(0)])
+            .constraints([Constraint::Min(0), Constraint::Length(0)])
             .split(area)
     };
 
-    if state.sidebar_visible {
-        draw_sidebar(f, columns[0], state);
-    }
-
-    let main = columns[1];
+    let main = columns[0];
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(6), Constraint::Length(6)])
+        .constraints([Constraint::Min(12), Constraint::Length(8)])
         .split(main);
 
     draw_chat_history(f, rows[0], state);
-    draw_tool_activity(f, rows[1], state);
-    draw_input_box(f, rows[2], state);
+    draw_input_box(f, rows[1], state);
+
+    if state.sidebar_visible {
+        draw_ops_rail(f, columns[1], state);
+    }
 }
 
-fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
+fn draw_ops_rail(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(0), Constraint::Length(6)])
+        .constraints([
+            Constraint::Length(8),
+            Constraint::Min(8),
+            Constraint::Length(10),
+            Constraint::Length(7),
+        ])
         .split(area);
 
-    let help_lines = vec![
+    let mut radar_lines = vec![
         Line::from(vec![
-            Span::styled("Enter", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
-            Span::styled(" send prompt", Style::default().fg(Palette::TEXT)),
+            Span::styled("Deck status", Style::default().fg(Palette::TEXT_DIM)),
+            Span::raw("  "),
+            Span::styled(
+                status_label(state),
+                Style::default()
+                    .fg(status_color(state))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("Tab", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
-            Span::styled(" switch tabs", Style::default().fg(Palette::TEXT)),
+            Span::styled("Focus", Style::default().fg(Palette::TEXT_DIM)),
+            Span::raw("  "),
+            Span::styled(focus_label(state.focus), Style::default().fg(Palette::TEXT)),
         ]),
         Line::from(vec![
-            Span::styled("Alt+S", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
-            Span::styled(" toggle sidebar", Style::default().fg(Palette::TEXT)),
+            Span::styled("Transcript", Style::default().fg(Palette::TEXT_DIM)),
+            Span::raw("  "),
+            Span::styled(
+                if state.chat_follow {
+                    "live feed"
+                } else {
+                    "history mode"
+                },
+                Style::default().fg(Palette::TEXT),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("F1", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
-            Span::styled(" cycle panes", Style::default().fg(Palette::TEXT)),
+            Span::styled("Current job", Style::default().fg(Palette::TEXT_DIM)),
+            Span::raw("  "),
+            Span::styled(
+                state.current_tool.as_deref().unwrap_or("idle"),
+                Style::default().fg(Palette::TEXT),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("Paste", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
-            Span::styled(" insert large prompts", Style::default().fg(Palette::TEXT)),
+            Span::styled("Keys", Style::default().fg(Palette::TEXT_DIM)),
+            Span::raw("  "),
+            Span::styled("F1 focus  Alt+S rail  End live", Style::default().fg(Palette::KEY)),
         ]),
     ];
 
-    let help = Paragraph::new(help_lines)
-        .block(panel_block("Quick Help", state.focus == Focus::Sidebar))
+    if !state.action_queue.is_empty() {
+        radar_lines.push(Line::from(vec![
+            Span::styled("Gate", Style::default().fg(Palette::TEXT_DIM)),
+            Span::raw("  "),
+            Span::styled(
+                format!("{} pending approvals", state.action_queue.len()),
+                Style::default()
+                    .fg(Palette::WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    let radar = Paragraph::new(radar_lines)
+        .block(panel_block("Session Radar", state.focus == Focus::Sidebar))
         .wrap(Wrap { trim: true });
-    f.render_widget(help, rows[0]);
+    f.render_widget(radar, rows[0]);
+
+    draw_tool_activity(f, rows[1], state);
 
     let items: Vec<ListItem> = if state.workspace_files.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            "No workspace files indexed yet.",
+            "Workspace scan is still warming up.",
             Style::default().fg(Palette::TEXT_DIM),
         )))]
     } else {
         state
             .workspace_files
             .iter()
+            .take(rows[2].height.saturating_sub(3) as usize)
             .map(|path| ListItem::new(Line::from(Span::styled(path.as_str(), Style::default().fg(Palette::TEXT)))))
             .collect()
     };
 
     let list = List::new(items)
-        .block(panel_block("Workspace", state.focus == Focus::Sidebar))
+        .block(panel_block("Working Set", state.focus == Focus::Sidebar))
         .highlight_style(
             Style::default()
                 .bg(Palette::PANEL_ALT)
@@ -725,11 +819,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
-    f.render_stateful_widget(list, rows[1], &mut state.file_list_state);
+    f.render_stateful_widget(list, rows[2], &mut state.file_list_state);
 
     let context_lines = if state.barq_context.is_empty() {
         vec![Line::from(Span::styled(
-            "BARQ context will appear here when available.",
+            "Briefing notes will appear here when available.",
             Style::default().fg(Palette::TEXT_DIM),
         ))]
     } else {
@@ -737,16 +831,16 @@ fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
             .barq_context
             .iter()
             .rev()
-            .take(3)
+            .take(4)
             .rev()
             .map(|line| Line::from(Span::styled(line.as_str(), Style::default().fg(Palette::TEXT))))
             .collect()
     };
 
     let context = Paragraph::new(context_lines)
-        .block(panel_block("Context", false))
+        .block(panel_block("Briefing", false))
         .wrap(Wrap { trim: true });
-    f.render_widget(context, rows[2]);
+    f.render_widget(context, rows[3]);
 }
 
 fn draw_chat_history(f: &mut Frame, area: Rect, state: &mut TuiState) {
@@ -764,7 +858,7 @@ fn draw_chat_history(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
         let ribbon = Paragraph::new(vec![
             Line::from(Span::styled(
-                "Prompt Context",
+                "Pinned Request",
                 Style::default()
                     .fg(Palette::BRAND)
                     .add_modifier(Modifier::BOLD),
@@ -799,9 +893,9 @@ fn draw_chat_history(f: &mut Frame, area: Rect, state: &mut TuiState) {
     }
 
     let conversation_title = if state.chat_follow {
-        "Conversation"
+        "Command Deck"
     } else {
-        "Conversation / History"
+        "Command Deck / History"
     };
 
     state.chat_resolved_scroll = render_lines_panel(
@@ -818,7 +912,12 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
     if let Some(tool) = &state.current_tool {
         lines.push(Line::from(vec![
-            Span::styled("Active", Style::default().fg(Palette::WARNING).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Active job",
+                Style::default()
+                    .fg(Palette::WARNING)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled(tool.as_str(), Style::default().fg(Palette::TEXT)),
         ]));
@@ -827,7 +926,7 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
     if state.tool_log.is_empty() {
         lines.push(Line::from(Span::styled(
-            "Tool activity will appear here.",
+            "Runs and tool activity will appear here.",
             Style::default().fg(Palette::TEXT_DIM),
         )));
     } else {
@@ -836,7 +935,7 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 .into_iter()
                 .enumerate()
             {
-                let prefix = if idx == 0 { "- " } else { "  " };
+                let prefix = if idx == 0 { ">> " } else { "   " };
                 lines.push(Line::from(vec![
                     Span::styled(prefix, Style::default().fg(Palette::KEY)),
                     Span::styled(line, Style::default().fg(Palette::TEXT)),
@@ -847,9 +946,9 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
     }
 
     let tool_title = if state.tool_follow {
-        "Tool Activity"
+        "Run Feed"
     } else {
-        "Tool Activity / History"
+        "Run Feed / History"
     };
 
     state.tool_resolved_scroll = render_lines_panel(
@@ -863,13 +962,13 @@ fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
 
 fn draw_input_box(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let title = match state.status_message.as_deref() {
-        Some(message) if !message.is_empty() => format!("Composer  {}", trim_chars(message, 60)),
+        Some(message) if !message.is_empty() => format!("Prompt Dock  {}", trim_chars(message, 60)),
         _ if !state.input.is_empty() => format!(
-            "Composer  {} lines / {} chars",
+            "Prompt Dock  {} lines / {} chars",
             state.input.lines().count().max(1),
             state.input.chars().count()
         ),
-        _ => "Composer".to_string(),
+        _ => "Prompt Dock".to_string(),
     };
 
     let content_width = area.width.saturating_sub(4) as usize;
@@ -946,11 +1045,11 @@ fn draw_diff_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
             )),
             Line::raw(""),
             Line::from(Span::styled(
-                "Run an edit or file mutation and the latest patch will appear here.",
+                "Run an edit or file mutation and the latest patch will land here.",
                 Style::default().fg(Palette::TEXT_MUTED),
             )),
         ])
-        .block(panel_block("Diff", false))
+        .block(panel_block("Patch Deck", false))
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
         f.render_widget(placeholder, area);
@@ -974,13 +1073,19 @@ fn draw_diff_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
         })
         .collect();
 
-    render_lines_panel(f, area, lines, &mut state.diff_scroll, panel_block("Diff", false));
+    render_lines_panel(
+        f,
+        area,
+        lines,
+        &mut state.diff_scroll,
+        panel_block("Patch Deck", false),
+    );
 }
 
 fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     if state.sessions.is_empty() {
-        let placeholder = Paragraph::new("No saved sessions found.")
-            .block(panel_block("Sessions", false))
+        let placeholder = Paragraph::new("No archived sessions found.")
+            .block(panel_block("Session Log", false))
             .alignment(Alignment::Center);
         f.render_widget(placeholder, area);
         return;
@@ -1014,7 +1119,7 @@ fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
         .collect();
 
     let list = List::new(items)
-        .block(panel_block("Saved Sessions", false))
+        .block(panel_block("Session Archive", false))
         .highlight_style(
             Style::default()
                 .bg(Palette::PANEL_ALT)
@@ -1041,7 +1146,7 @@ fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
             Line::from(format!("Events: {}", session.event_count)),
             Line::raw(""),
             Line::from(Span::styled(
-                "Press Enter to replay this session into the chat tab.",
+                "Press Enter to replay this session into the console.",
                 Style::default().fg(Palette::TEXT_MUTED),
             )),
         ]
@@ -1050,7 +1155,7 @@ fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     };
 
     let detail_panel = Paragraph::new(details)
-        .block(panel_block("Session Details", false))
+        .block(panel_block("Replay Brief", false))
         .wrap(Wrap { trim: true });
     f.render_widget(detail_panel, columns[1]);
 }
@@ -1059,7 +1164,7 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     if state.action_queue.is_empty() {
         let placeholder = Paragraph::new(vec![
             Line::from(Span::styled(
-                "No pending approvals.",
+                "Gate is clear.",
                 Style::default().fg(Palette::TEXT_DIM),
             )),
             Line::raw(""),
@@ -1068,7 +1173,7 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 Style::default().fg(Palette::TEXT_MUTED),
             )),
         ])
-        .block(panel_block("Approvals", false))
+        .block(panel_block("Approval Gate", false))
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
         f.render_widget(placeholder, area);
@@ -1104,7 +1209,7 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
         .collect();
 
     let list = List::new(items)
-        .block(panel_block("Pending Approvals", false))
+        .block(panel_block("Gate Queue", false))
         .highlight_style(
             Style::default()
                 .bg(Palette::PANEL_ALT)
@@ -1120,7 +1225,7 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let selected = &state.action_queue[state.action_queue_selected.min(state.action_queue.len() - 1)];
     let mut preview_lines = vec![
         Line::from(Span::styled(
-            "Approve with Y, deny with N. Esc denies all pending requests.",
+            "Y approve once. A trust this tool for the run. N deny. Esc denies all pending requests.",
             Style::default().fg(Palette::WARNING),
         )),
         Line::raw(""),
@@ -1163,26 +1268,62 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
         columns[1],
         preview_lines,
         &mut state.action_preview_scroll,
-        panel_block("Approval Preview", false),
+        panel_block("Decision Preview", false),
     );
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, state: &TuiState) {
     let content = match state.active_tab {
-        ActiveTab::Chat => "Type or paste prompt  Enter send  F1 cycle panes  Up/Down or PgUp/PgDn scroll focused pane  End resume live view  Tab switch tabs  Esc quit",
-        ActiveTab::Diff => "Up/Down scroll  PageUp/PageDown fast scroll  Home/End jump  Tab switch tabs  Esc quit",
-        ActiveTab::Sessions => "Up/Down select  Enter replay session  Tab switch tabs  Esc quit",
-        ActiveTab::ActionQueue => "Up/Down select  PageUp/PageDown preview scroll  Y approve once  A allow this tool  N deny  Esc deny all or quit",
+        ActiveTab::Chat => vec![
+            Line::from(Span::styled(
+                "Prompt dock: type or paste a request, Enter sends, paste keeps multiline prompts intact.",
+                Style::default().fg(Palette::TEXT_DIM),
+            )),
+            Line::from(Span::styled(
+                "Navigation: F1 moves focus, PgUp/PgDn scroll the focused pane, End snaps transcript/feed back to live, Alt+S hides the rail, Esc quits.",
+                Style::default().fg(Palette::TEXT_MUTED),
+            )),
+        ],
+        ActiveTab::Diff => vec![
+            Line::from(Span::styled(
+                "Patch deck: Up/Down scroll, PgUp/PgDn fast scroll, Home/End jump.",
+                Style::default().fg(Palette::TEXT_DIM),
+            )),
+            Line::from(Span::styled(
+                "Tab switches decks. Esc quits.",
+                Style::default().fg(Palette::TEXT_MUTED),
+            )),
+        ],
+        ActiveTab::Sessions => vec![
+            Line::from(Span::styled(
+                "Session log: Up/Down selects an archive entry, Enter replays it into the console.",
+                Style::default().fg(Palette::TEXT_DIM),
+            )),
+            Line::from(Span::styled(
+                "Tab switches decks. Esc quits.",
+                Style::default().fg(Palette::TEXT_MUTED),
+            )),
+        ],
+        ActiveTab::ActionQueue => vec![
+            Line::from(Span::styled(
+                "Approval gate: Up/Down selects, PgUp/PgDn scrolls the preview, Y approves once, A trusts the tool for this run, N denies.",
+                Style::default().fg(Palette::TEXT_DIM),
+            )),
+            Line::from(Span::styled(
+                "Esc denies all pending requests or quits when the gate is empty.",
+                Style::default().fg(Palette::TEXT_MUTED),
+            )),
+        ],
     };
 
-    let footer = Paragraph::new(Span::styled(content, Style::default().fg(Palette::TEXT_DIM)))
+    let footer = Paragraph::new(content)
         .alignment(Alignment::Left)
         .style(Style::default().bg(Palette::BG));
     f.render_widget(footer, area);
 }
 
 fn draw_permission_prompt(f: &mut Frame, prompt: &PermissionPrompt) {
-    let area = centered_rect(68, 10, f.area());
+    let area = centered_rect(72, 11, f.area());
     let widget = Paragraph::new(vec![
         Line::from(Span::styled(
             prompt.title.as_str(),
@@ -1203,7 +1344,7 @@ fn draw_permission_prompt(f: &mut Frame, prompt: &PermissionPrompt) {
     ])
     .block(
         Block::default()
-            .title(" Permission Required ")
+            .title(" Action Gate ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Palette::BORDER_ACTIVE))
             .style(Style::default().bg(Palette::PANEL_ALT))
@@ -1285,12 +1426,12 @@ fn build_transcript_lines(messages: &[ChatMessage], max_width: usize) -> Vec<Lin
 
 fn push_message_card(lines: &mut Vec<Line<'static>>, message: &ChatMessage, max_width: usize) {
     let (marker, title, accent, body_color) = match message.kind {
-        MessageKind::User => (">", "Prompt", Palette::USER, Palette::TEXT),
-        MessageKind::Agent => ("<", "Barq", Palette::AGENT, Palette::TEXT),
-        MessageKind::ToolCall => ("*", "Tool Request", Palette::TOOL, Palette::TEXT),
-        MessageKind::ToolResult => ("=", "Tool Result", Palette::RESULT, Palette::TEXT),
-        MessageKind::System => ("-", "Session Note", Palette::TEXT_DIM, Palette::TEXT_DIM),
-        MessageKind::Error => ("!", "Error", Palette::ERROR, Palette::ERROR),
+        MessageKind::User => (">>", "Request", Palette::USER, Palette::TEXT),
+        MessageKind::Agent => ("<<", "Response", Palette::AGENT, Palette::TEXT),
+        MessageKind::ToolCall => ("++", "Tool Call", Palette::TOOL, Palette::TEXT),
+        MessageKind::ToolResult => ("==", "Tool Output", Palette::RESULT, Palette::TEXT),
+        MessageKind::System => ("--", "Status", Palette::TEXT_DIM, Palette::TEXT_DIM),
+        MessageKind::Error => ("!!", "Failure", Palette::ERROR, Palette::ERROR),
     };
 
     lines.push(Line::from(vec![
@@ -1302,7 +1443,7 @@ fn push_message_card(lines: &mut Vec<Line<'static>>, message: &ChatMessage, max_
 
     for body_line in wrap_message_body(&message.content, max_width.saturating_sub(2).max(1)) {
         lines.push(Line::from(vec![
-            Span::styled("| ", Style::default().fg(accent)),
+            Span::styled(": ", Style::default().fg(accent)),
             Span::styled(body_line, Style::default().fg(body_color)),
         ]));
     }
@@ -1446,17 +1587,36 @@ fn wrap_visual_line(line: &str, max_width: usize) -> Vec<String> {
 
 fn status_label(state: &TuiState) -> String {
     if state.is_indexing {
-        format!("{} indexing", spinner_frame(state.tick))
+        format!("{} indexing workspace", spinner_frame(state.tick))
     } else if state.is_thinking {
         match &state.current_tool {
             Some(tool) => format!("{} running {}", spinner_frame(state.tick), tool),
-            None => format!("{} thinking", spinner_frame(state.tick)),
+            None => format!("{} drafting response", spinner_frame(state.tick)),
         }
     } else if !state.action_queue.is_empty() {
-        format!("{} approval waiting", state.action_queue.len())
+        format!("{} gate waiting", state.action_queue.len())
     } else {
-        "ready".to_string()
+        "deck ready".to_string()
     }
+}
+
+fn focus_label(focus: Focus) -> &'static str {
+    match focus {
+        Focus::Input => "prompt dock",
+        Focus::Sidebar => "ops rail",
+        Focus::Chat => "command deck",
+        Focus::ToolLog => "run feed",
+    }
+}
+
+fn chip(label: impl Into<String>, fg: Color, bg: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {} ", label.into()),
+        Style::default()
+            .fg(fg)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 #[cfg(test)]
@@ -1550,10 +1710,10 @@ mod tests {
         );
         let rendered: Vec<String> = lines.into_iter().map(|line| line.to_string()).collect();
 
-        assert!(rendered.iter().any(|line| line.contains("> Prompt")));
-        assert!(rendered.iter().any(|line| line.contains("| Fix the failing tests")));
-        assert!(rendered.iter().any(|line| line.contains("* Tool Request")));
-        assert!(rendered.iter().any(|line| line.contains("| Run shell command")));
+        assert!(rendered.iter().any(|line| line.contains(">> Request")));
+        assert!(rendered.iter().any(|line| line.contains(": Fix the failing tests")));
+        assert!(rendered.iter().any(|line| line.contains("++ Tool Call")));
+        assert!(rendered.iter().any(|line| line.contains(": Run shell command")));
     }
 }
 
