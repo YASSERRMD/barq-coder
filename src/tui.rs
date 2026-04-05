@@ -286,7 +286,7 @@ impl TuiState {
             active_tab: ActiveTab::Chat,
             focus: Focus::Input,
             messages: vec![ChatMessage::system(
-                "Welcome to BarqCoder ⚡  Type a prompt or /help for commands.",
+                "\u{26A1} BarqCoder is ready.  Type a prompt to begin, or /help for commands.\n\nShortcuts: Shift+Enter = newline, Ctrl+U = clear, Tab = switch tabs, F1 = cycle focus, Alt+S = toggle sidebar",
             )],
             chat_scroll: 0,
             input: String::new(),
@@ -1890,14 +1890,20 @@ fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
 }
 
 fn draw_permission_prompt(f: &mut Frame, prompt: &PermissionPrompt) {
-    let area = centered_rect(70, 11, f.area());
+    let area = centered_rect(70, 13, f.area());
     let text = vec![
-        Line::from(Span::styled(
-            prompt.title.as_str(),
-            Style::default()
-                .fg(Palette::TEXT_BRIGHT)
-                .add_modifier(Modifier::BOLD),
-        )),
+        Line::from(vec![
+            Span::styled(
+                " \u{26A0} ",
+                Style::default().fg(Palette::WARN_MSG).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                prompt.title.as_str(),
+                Style::default()
+                    .fg(Palette::TEXT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Line::raw(""),
         Line::from(Span::styled(
             prompt.reason.as_str(),
@@ -1909,6 +1915,17 @@ fn draw_permission_prompt(f: &mut Frame, prompt: &PermissionPrompt) {
             Style::default().fg(Palette::WARN_MSG).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
+        Line::from(vec![
+            Span::styled(" Y ", Style::default().fg(Palette::BG).bg(Palette::STATUS_OK).add_modifier(Modifier::BOLD)),
+            Span::styled(" Approve  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled(" A ", Style::default().fg(Palette::BG).bg(Palette::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" Trust tool  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled(" N ", Style::default().fg(Palette::BG).bg(Palette::STATUS_ERR).add_modifier(Modifier::BOLD)),
+            Span::styled(" Deny  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled(" Esc ", Style::default().fg(Palette::BG).bg(Palette::TEXT_DIM).add_modifier(Modifier::BOLD)),
+            Span::styled(" Deny all", Style::default().fg(Palette::TEXT_DIM)),
+        ]),
+        Line::raw(""),
         Line::from(Span::styled(
             format!("Queued approvals: {}", prompt.queue_len),
             Style::default().fg(Palette::TEXT_DIM),
@@ -1918,10 +1935,13 @@ fn draw_permission_prompt(f: &mut Frame, prompt: &PermissionPrompt) {
     let widget = Paragraph::new(text)
         .block(
             Block::default()
-                .title(" Permission Required ")
+                .title(Line::from(Span::styled(
+                    " \u{1F512} Permission Required ",
+                    Style::default().fg(Palette::WARN_MSG).add_modifier(Modifier::BOLD),
+                )))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Double)
-                .border_style(Style::default().fg(Palette::BORDER_ACTIVE))
+                .border_style(Style::default().fg(Palette::WARN_MSG))
                 .style(Style::default().bg(Palette::SURFACE2))
                 .padding(Padding::horizontal(1)),
         )
