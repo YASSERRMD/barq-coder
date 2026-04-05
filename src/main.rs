@@ -68,6 +68,144 @@ struct App {
     skip_permissions: bool,
 }
 
+const TOOL_SUMMARY_MAX_CHARS: usize = 120;
+
+fn truncate_inline(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let mut shortened = String::new();
+    for ch in text.chars().take(max_chars.saturating_sub(1)) {
+        shortened.push(ch);
+    }
+    shortened.push('…');
+    shortened
+}
+
+fn content_stats(label: &str, text: Option<&str>) -> Option<String> {
+    let value = text?;
+    Some(format!(
+        "{}: {} lines / {} chars",
+        label,
+        value.lines().count().max(1),
+        value.chars().count()
+    ))
+}
+
+fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
+    match name {
+        "edit_file" => {
+            let path = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            let detail = if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
+                format!(
+                    "patch: {} lines / {} chars",
+                    patch.lines().count().max(1),
+                    patch.chars().count()
+                )
+            } else {
+                let mut bits = Vec::new();
+                if let Some(old) = content_stats("old", args.get("old_string").and_then(|v| v.as_str())) {
+                    bits.push(old);
+                }
+                if let Some(new) = content_stats("new", args.get("new_string").and_then(|v| v.as_str())) {
+                    bits.push(new);
+                }
+                bits.join(", ")
+            };
+
+            if detail.is_empty() {
+                format!("Calling edit_file on {}", path)
+            } else {
+                format!("Calling edit_file on {} ({})", path, detail)
+            }
+        }
+        "create_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            let detail = content_stats("content", args.get("content").and_then(|v| v.as_str()))
+                .unwrap_or_else(|| "content unavailable".to_string());
+            format!("Calling create_file for {} ({})", path, detail)
+        }
+        "shell_exec" => {
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            format!("Calling shell_exec: {}", truncate_inline(command, TOOL_SUMMARY_MAX_CHARS))
+        }
+        "git_ops" => {
+            let operation = args.get("operation").and_then(|v| v.as_str()).unwrap_or("status");
+            let extra = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
+            let command = if extra.trim().is_empty() {
+                format!("git {}", operation)
+            } else {
+                format!("git {} {}", operation, extra.trim())
+            };
+            format!("Calling git_ops: {}", truncate_inline(&command, TOOL_SUMMARY_MAX_CHARS))
+        }
+        _ => {
+            let pretty = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+            format!(
+                "Calling {} with {}",
+                name,
+                truncate_inline(&pretty, TOOL_SUMMARY_MAX_CHARS)
+            )
+        }
+    }
+}
+
+fn summarize_tool_result(name: &str, result: &serde_json::Value) -> String {
+    if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
+        return format!("{} failed: {}", name, truncate_inline(error, TOOL_SUMMARY_MAX_CHARS));
+    }
+
+    match name {
+        "edit_file" => {
+            let applied = result.get("applied").and_then(|v| v.as_bool()).unwrap_or(false);
+            let preview = result.get("preview").and_then(|v| v.as_bool()).unwrap_or(false);
+            let reverted = result.get("reverted").and_then(|v| v.as_bool()).unwrap_or(false);
+            if preview {
+                "edit_file preview generated".to_string()
+            } else if applied && reverted {
+                "edit_file applied then reverted".to_string()
+            } else if applied {
+                "edit_file applied".to_string()
+            } else {
+                "edit_file completed".to_string()
+            }
+        }
+        "create_file" => {
+            let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+            if result.get("created").and_then(|v| v.as_bool()).unwrap_or(false) {
+                format!("Created {}", path)
+            } else {
+                format!("create_file completed for {}", path)
+            }
+        }
+        "shell_exec" => {
+            let exit_code = result.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let timed_out = result.get("timed_out").and_then(|v| v.as_bool()).unwrap_or(false);
+            if timed_out {
+                format!("shell_exec timed out (exit {})", exit_code)
+            } else {
+                format!("shell_exec exited with {}", exit_code)
+            }
+        }
+        "git_ops" => {
+            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            if success {
+                "git_ops completed".to_string()
+            } else {
+                "git_ops reported an error".to_string()
+            }
+        }
+        _ => {
+            let pretty = serde_json::to_string(result).unwrap_or_else(|_| "{}".to_string());
+            format!("{} result: {}", name, truncate_inline(&pretty, TOOL_SUMMARY_MAX_CHARS))
+        }
+    }
+}
+
 impl App {
     fn new(resume_id: Option<String>, cli: &Cli) -> Self {
         let mut config = Config::load();
@@ -190,10 +328,13 @@ impl App {
                     self.tui.add_message(ChatMessage::agent(&content));
                 }
                 SessionEvent::ToolCall { name, args, .. } => {
-                    self.tui.add_message(ChatMessage::tool_call(format!(
-                        "{} ← {}",
-                        name, args
-                    )));
+                    self.tui
+                        .add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
+                }
+                SessionEvent::ToolResult { name, result, .. } => {
+                    let entry = summarize_tool_result(&name, &result);
+                    self.tui.tool_log.push(entry.clone());
+                    self.tui.add_message(ChatMessage::tool_result(entry));
                 }
                 SessionEvent::EditApplied { file, patch, .. } => {
                     // Just show as system message for historical load
@@ -407,20 +548,20 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::Token(t) => {
                         app.tui.is_thinking = true;
                         app.tui.append_agent_token(&t);
-                        let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&t));
                     }
                     OrchestratorEvent::ToolCall { name, args } => {
                         app.tui.current_tool = Some(name.clone());
-                        let entry = format!("Calling {} with {}", name, args);
+                        let entry = summarize_tool_call(&name, &args);
                         app.tui.tool_log.push(entry.clone());
                         app.tui.add_message(ChatMessage::tool_call(&entry));
                         let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_call(&name, args.clone()));
                     }
                     OrchestratorEvent::ToolResult { name, result } => {
                         app.tui.current_tool = None;
-                        let entry = format!("Result for {}: {}", name, result);
+                        let entry = summarize_tool_result(&name, &result);
                         app.tui.tool_log.push(entry.clone());
                         app.tui.add_message(ChatMessage::tool_result(&entry));
+                        let _ = app.session_store.append(&app.session_id, &SessionEvent::tool_result(&name, result));
                     }
                     OrchestratorEvent::PermissionRequested { name, args, reason, tx } => {
                         app.tui.current_tool = None;
@@ -465,7 +606,15 @@ async fn run_app<B: ratatui::backend::Backend>(
                     OrchestratorEvent::Done(answer) => {
                         app.tui.is_thinking = false;
                         app.tui.current_tool = None;
-                        app.tui.add_message(ChatMessage::agent(&answer));
+                        let already_streamed = matches!(
+                            app.tui.messages.last(),
+                            Some(last)
+                                if matches!(last.kind, tui::MessageKind::Agent)
+                                    && last.content == answer
+                        );
+                        if !already_streamed {
+                            app.tui.add_message(ChatMessage::agent(&answer));
+                        }
                         app.tui.set_status("Done", false);
                         app.event_rx = None;
                         let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&answer));
@@ -769,10 +918,14 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                                 app.tui.append_agent_token(&content);
                             }
                             SessionEvent::ToolCall { name, args, .. } => {
-                                app.tui.add_message(ChatMessage::tool_call(format!(
-                                    "{} ← {}",
-                                    name, args
+                                app.tui.add_message(ChatMessage::tool_call(summarize_tool_call(
+                                    &name, &args,
                                 )));
+                            }
+                            SessionEvent::ToolResult { name, result, .. } => {
+                                let entry = summarize_tool_result(&name, &result);
+                                app.tui.tool_log.push(entry.clone());
+                                app.tui.add_message(ChatMessage::tool_result(entry));
                             }
                             SessionEvent::EditApplied { file, patch, .. } => {
                                 app.tui.set_diff(&patch);
@@ -988,6 +1141,42 @@ impl TuiState {
     }
     pub fn mark_quit(&mut self) {
         self._quit = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{summarize_tool_call, summarize_tool_result};
+    use serde_json::json;
+
+    #[test]
+    fn summarize_create_file_call_reports_counts_not_full_content() {
+        let summary = summarize_tool_call(
+            "create_file",
+            &json!({
+                "path": "src/generated.rs",
+                "content": "fn main() {}\n".repeat(80),
+            }),
+        );
+
+        assert!(summary.contains("Calling create_file for src/generated.rs"));
+        assert!(summary.contains("80 lines"));
+        assert!(!summary.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn summarize_shell_result_prefers_exit_code() {
+        let summary = summarize_tool_result(
+            "shell_exec",
+            &json!({
+                "stdout": "ok",
+                "stderr": "",
+                "exit_code": 0,
+                "timed_out": false
+            }),
+        );
+
+        assert_eq!(summary, "shell_exec exited with 0");
     }
 }
 
