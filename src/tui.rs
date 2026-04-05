@@ -3,55 +3,44 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph,
-        Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs, Wrap,
+        Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Tabs, Wrap,
     },
     Frame,
 };
 
-// ─────────────────────────────────────────────
-// Palette
-// ─────────────────────────────────────────────
 pub struct Palette;
+
 impl Palette {
-    pub const BG: Color = Color::Rgb(13, 14, 20);
-    pub const SURFACE: Color = Color::Rgb(22, 24, 35);
-    pub const SURFACE2: Color = Color::Rgb(30, 33, 48);
-    pub const BORDER: Color = Color::Rgb(50, 56, 82);
-    pub const BORDER_ACTIVE: Color = Color::Rgb(100, 120, 220);
-    pub const ACCENT: Color = Color::Rgb(110, 130, 255);
-    pub const ACCENT2: Color = Color::Rgb(80, 200, 180);
-    pub const TEXT: Color = Color::Rgb(210, 215, 240);
-    pub const TEXT_DIM: Color = Color::Rgb(100, 108, 140);
-    pub const TEXT_BRIGHT: Color = Color::White;
-    pub const USER_MSG: Color = Color::Rgb(130, 210, 255);
-    pub const AGENT_MSG: Color = Color::Rgb(170, 255, 190);
-    pub const ERROR_MSG: Color = Color::Rgb(255, 100, 110);
-    pub const WARN_MSG: Color = Color::Rgb(255, 200, 80);
-    pub const TOOL_CALL: Color = Color::Rgb(200, 160, 255);
-    pub const TOOL_RESULT: Color = Color::Rgb(255, 180, 100);
-    pub const DIFF_ADD: Color = Color::Rgb(80, 200, 120);
-    pub const DIFF_DEL: Color = Color::Rgb(240, 80, 90);
-    pub const DIFF_HUNK: Color = Color::Rgb(100, 180, 255);
-    pub const STATUS_OK: Color = Color::Rgb(80, 220, 140);
-    pub const STATUS_ERR: Color = Color::Rgb(255, 80, 100);
-    pub const STATUS_WARN: Color = Color::Rgb(255, 200, 60);
-    pub const KEY_HINT: Color = Color::Rgb(90, 100, 140);
-    pub const KEY_LABEL: Color = Color::Rgb(140, 155, 210);
+    pub const BG: Color = Color::Rgb(14, 18, 24);
+    pub const PANEL: Color = Color::Rgb(23, 28, 36);
+    pub const PANEL_ALT: Color = Color::Rgb(29, 35, 44);
+    pub const PANEL_MUTED: Color = Color::Rgb(33, 41, 52);
+    pub const BORDER: Color = Color::Rgb(74, 86, 102);
+    pub const BORDER_ACTIVE: Color = Color::Rgb(94, 164, 255);
+    pub const TEXT: Color = Color::Rgb(229, 235, 242);
+    pub const TEXT_DIM: Color = Color::Rgb(150, 161, 174);
+    pub const TEXT_MUTED: Color = Color::Rgb(117, 128, 141);
+    pub const BRAND: Color = Color::Rgb(94, 164, 255);
+    pub const USER: Color = Color::Rgb(92, 214, 163);
+    pub const AGENT: Color = Color::Rgb(255, 219, 102);
+    pub const TOOL: Color = Color::Rgb(147, 197, 253);
+    pub const RESULT: Color = Color::Rgb(244, 162, 97);
+    pub const ERROR: Color = Color::Rgb(255, 107, 107);
+    pub const SUCCESS: Color = Color::Rgb(80, 200, 120);
+    pub const WARNING: Color = Color::Rgb(255, 201, 107);
+    pub const DIFF_ADD: Color = Color::Rgb(109, 208, 130);
+    pub const DIFF_DEL: Color = Color::Rgb(255, 120, 120);
+    pub const DIFF_HUNK: Color = Color::Rgb(132, 196, 255);
+    pub const KEY: Color = Color::Rgb(110, 123, 140);
 }
 
-// ─────────────────────────────────────────────
-// Spinner
-// ─────────────────────────────────────────────
-const SPINNER_FRAMES: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+const SPINNER_FRAMES: &[&str] = &["-", "\\", "|", "/"];
 
 pub fn spinner_frame(tick: usize) -> &'static str {
     SPINNER_FRAMES[tick % SPINNER_FRAMES.len()]
 }
 
-// ─────────────────────────────────────────────
-// Tab enum
-// ─────────────────────────────────────────────
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ActiveTab {
     Chat = 0,
@@ -69,6 +58,7 @@ impl ActiveTab {
             Self::ActionQueue => Self::Chat,
         }
     }
+
     pub fn prev(self) -> Self {
         match self {
             Self::Chat => Self::ActionQueue,
@@ -79,9 +69,6 @@ impl ActiveTab {
     }
 }
 
-// ─────────────────────────────────────────────
-// Focus enum
-// ─────────────────────────────────────────────
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Input,
@@ -90,9 +77,6 @@ pub enum Focus {
     ToolLog,
 }
 
-// ─────────────────────────────────────────────
-// Chat message types
-// ─────────────────────────────────────────────
 #[derive(Clone, Debug)]
 pub enum MessageKind {
     User,
@@ -111,40 +95,63 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn user(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::User, content: s.into() }
+        Self {
+            kind: MessageKind::User,
+            content: s.into(),
+        }
     }
+
     pub fn agent(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::Agent, content: s.into() }
+        Self {
+            kind: MessageKind::Agent,
+            content: s.into(),
+        }
     }
+
     pub fn tool_call(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::ToolCall, content: s.into() }
+        Self {
+            kind: MessageKind::ToolCall,
+            content: s.into(),
+        }
     }
+
     pub fn tool_result(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::ToolResult, content: s.into() }
+        Self {
+            kind: MessageKind::ToolResult,
+            content: s.into(),
+        }
     }
+
     pub fn system(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::System, content: s.into() }
+        Self {
+            kind: MessageKind::System,
+            content: s.into(),
+        }
     }
+
     pub fn error(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::Error, content: s.into() }
+        Self {
+            kind: MessageKind::Error,
+            content: s.into(),
+        }
     }
 }
 
-// ─────────────────────────────────────────────
-// Pending agent action — queued for user review
-// ─────────────────────────────────────────────
 #[derive(Clone, Debug)]
 pub enum ActionKind {
-    /// Write or overwrite a file with the given content.
     WriteFile {
         path: String,
         patch: String,
         full_content: String,
     },
-    /// Run a shell command (requires explicit user approval).
-    ShellCommand { command: String, reason: String },
-    /// Apply a verified patch from the VerificationGate.
-    ApplyVerifiedPatch { patch: String, step_id: String },
+    ShellCommand {
+        command: String,
+        reason: String,
+    },
+    ApplyVerifiedPatch {
+        patch: String,
+        step_id: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -155,23 +162,62 @@ pub struct PendingAction {
 }
 
 impl PendingAction {
-    pub fn write_file(path: impl Into<String>, patch: impl Into<String>, full_content: impl Into<String>, agent: impl Into<String>) -> Self {
-        Self { kind: ActionKind::WriteFile { path: path.into(), patch: patch.into(), full_content: full_content.into() }, agent: agent.into(), approved: None }
+    pub fn write_file(
+        path: impl Into<String>,
+        patch: impl Into<String>,
+        full_content: impl Into<String>,
+        agent: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: ActionKind::WriteFile {
+                path: path.into(),
+                patch: patch.into(),
+                full_content: full_content.into(),
+            },
+            agent: agent.into(),
+            approved: None,
+        }
     }
 
-    pub fn shell_cmd(command: impl Into<String>, reason: impl Into<String>, agent: impl Into<String>) -> Self {
-        Self { kind: ActionKind::ShellCommand { command: command.into(), reason: reason.into() }, agent: agent.into(), approved: None }
+    pub fn shell_cmd(
+        command: impl Into<String>,
+        reason: impl Into<String>,
+        agent: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: ActionKind::ShellCommand {
+                command: command.into(),
+                reason: reason.into(),
+            },
+            agent: agent.into(),
+            approved: None,
+        }
     }
 
-    pub fn verified_patch(patch: impl Into<String>, step_id: impl Into<String>, agent: impl Into<String>) -> Self {
-        Self { kind: ActionKind::ApplyVerifiedPatch { patch: patch.into(), step_id: step_id.into() }, agent: agent.into(), approved: None }
+    pub fn verified_patch(
+        patch: impl Into<String>,
+        step_id: impl Into<String>,
+        agent: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: ActionKind::ApplyVerifiedPatch {
+                patch: patch.into(),
+                step_id: step_id.into(),
+            },
+            agent: agent.into(),
+            approved: None,
+        }
     }
 
     pub fn label(&self) -> String {
         match &self.kind {
-            ActionKind::WriteFile { path, .. } => format!("Write: {}", path),
-            ActionKind::ShellCommand { command, .. } => format!("Shell: {}", &command[..command.len().min(60)]),
-            ActionKind::ApplyVerifiedPatch { step_id, .. } => format!("Patch (verified): {}", step_id),
+            ActionKind::WriteFile { path, .. } => format!("Write {}", path),
+            ActionKind::ShellCommand { command, .. } => {
+                format!("Shell {}", trim_chars(command, 48))
+            }
+            ActionKind::ApplyVerifiedPatch { step_id, .. } => {
+                format!("Patch {}", step_id)
+            }
         }
     }
 
@@ -184,9 +230,6 @@ impl PendingAction {
     }
 }
 
-// ─────────────────────────────────────────────
-// Session entry for the Sessions tab
-// ─────────────────────────────────────────────
 #[derive(Clone, Debug)]
 pub struct SessionEntry {
     pub id: String,
@@ -195,52 +238,30 @@ pub struct SessionEntry {
     pub workspace: String,
 }
 
-// ─────────────────────────────────────────────
-// Full TUI state
-// ─────────────────────────────────────────────
 pub struct TuiState {
-    // Tabs
     pub active_tab: ActiveTab,
     pub focus: Focus,
-
-    // Chat
     pub messages: Vec<ChatMessage>,
     pub chat_scroll: usize,
-
-    // Input
     pub input: String,
     pub input_cursor: usize,
     pub input_history: Vec<String>,
     pub input_history_idx: usize,
     pub autocomplete_idx: usize,
-
-    // Sidebar / file tree
     pub workspace_files: Vec<String>,
     pub file_list_state: ListState,
     pub sidebar_visible: bool,
-
-    // Tool log
     pub tool_log: Vec<String>,
     pub tool_scroll: usize,
     pub current_tool: Option<String>,
-
-    // Barq context
     pub barq_context: Vec<String>,
-
-    // Diff view
     pub diff_content: Vec<String>,
     pub diff_scroll: usize,
-
-    // Action Sandbox (Phase 3)
     pub action_queue: Vec<PendingAction>,
     pub action_queue_selected: usize,
     pub action_preview_scroll: usize,
-
-    // Sessions
     pub sessions: Vec<SessionEntry>,
     pub session_list_state: ListState,
-
-    // Status
     pub is_thinking: bool,
     pub is_indexing: bool,
     pub tick: usize,
@@ -255,27 +276,29 @@ pub struct TuiState {
 
 impl TuiState {
     pub fn new(token_limit: u32, model: String, session_id: String) -> Self {
+        let mut file_list_state = ListState::default();
+        file_list_state.select(Some(0));
+
+        let mut session_list_state = ListState::default();
+        session_list_state.select(Some(0));
+
         Self {
             active_tab: ActiveTab::Chat,
             focus: Focus::Input,
             messages: vec![ChatMessage::system(
-                "Welcome to BarqCoder ⚡  Type a prompt or /help for commands.",
+                "Welcome to BarqCoder. Type a prompt or /help to see commands.",
             )],
-            chat_scroll: 0,
+            chat_scroll: usize::MAX,
             input: String::new(),
             input_cursor: 0,
             input_history: Vec::new(),
             input_history_idx: 0,
             autocomplete_idx: 0,
             workspace_files: Vec::new(),
-            file_list_state: {
-                let mut s = ListState::default();
-                s.select(Some(0));
-                s
-            },
+            file_list_state,
             sidebar_visible: true,
             tool_log: Vec::new(),
-            tool_scroll: 0,
+            tool_scroll: usize::MAX,
             current_tool: None,
             barq_context: Vec::new(),
             diff_content: Vec::new(),
@@ -284,11 +307,7 @@ impl TuiState {
             action_queue_selected: 0,
             action_preview_scroll: 0,
             sessions: Vec::new(),
-            session_list_state: {
-                let mut s = ListState::default();
-                s.select(Some(0));
-                s
-            },
+            session_list_state,
             is_thinking: false,
             is_indexing: false,
             tick: 0,
@@ -304,24 +323,19 @@ impl TuiState {
 
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
-        // auto-scroll to bottom
         self.chat_scroll = usize::MAX;
     }
 
     pub fn append_agent_token(&mut self, token: &str) {
         match self.messages.last_mut() {
-            Some(m) if matches!(m.kind, MessageKind::Agent) => {
-                m.content.push_str(token);
-            }
-            _ => {
-                self.messages.push(ChatMessage::agent(token));
-            }
+            Some(last) if matches!(last.kind, MessageKind::Agent) => last.content.push_str(token),
+            _ => self.messages.push(ChatMessage::agent(token)),
         }
         self.chat_scroll = usize::MAX;
     }
 
     pub fn set_diff(&mut self, patch: &str) {
-        self.diff_content = patch.lines().map(|l| l.to_string()).collect();
+        self.diff_content = patch.lines().map(|line| line.to_string()).collect();
         self.diff_scroll = 0;
         self.active_tab = ActiveTab::Diff;
     }
@@ -342,37 +356,33 @@ impl TuiState {
     }
 
     pub fn input_delete_back(&mut self) {
-        if self.input_cursor > 0 {
-            let c_start = self
-                .input
-                .char_indices()
-                .rev()
-                .find(|(i, _)| *i < self.input_cursor)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.input.drain(c_start..self.input_cursor);
-            self.input_cursor = c_start;
+        if self.input_cursor == 0 {
+            return;
+        }
+
+        if let Some((idx, _)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input.drain(idx..self.input_cursor);
+            self.input_cursor = idx;
         }
         self.autocomplete_idx = 0;
     }
 
     pub fn input_move_left(&mut self) {
-        if self.input_cursor > 0 {
-            self.input_cursor = self
-                .input
-                .char_indices()
-                .rev()
-                .find(|(i, _)| *i < self.input_cursor)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+        if self.input_cursor == 0 {
+            return;
+        }
+        if let Some((idx, _)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input_cursor = idx;
         }
     }
 
     pub fn input_move_right(&mut self) {
-        if self.input_cursor < self.input.len() {
-            if let Some((i, c)) = self.input[self.input_cursor..].char_indices().next() {
-                self.input_cursor += i + c.len_utf8();
-            }
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+
+        if let Some((idx, ch)) = self.input[self.input_cursor..].char_indices().next() {
+            self.input_cursor += idx + ch.len_utf8();
         }
     }
 
@@ -388,11 +398,12 @@ impl TuiState {
         if self.input_history.is_empty() {
             return;
         }
+
         if self.input_history_idx > 0 {
             self.input_history_idx -= 1;
         }
-        let entry = self.input_history[self.input_history_idx].clone();
-        self.input = entry;
+
+        self.input = self.input_history[self.input_history_idx].clone();
         self.input_cursor = self.input.len();
     }
 
@@ -400,10 +411,10 @@ impl TuiState {
         if self.input_history.is_empty() {
             return;
         }
+
         if self.input_history_idx + 1 < self.input_history.len() {
             self.input_history_idx += 1;
-            let entry = self.input_history[self.input_history_idx].clone();
-            self.input = entry;
+            self.input = self.input_history[self.input_history_idx].clone();
         } else {
             self.input_history_idx = self.input_history.len();
             self.input.clear();
@@ -416,6 +427,7 @@ impl TuiState {
         if trimmed.is_empty() {
             return None;
         }
+
         self.input_history.push(trimmed.clone());
         self.input_history_idx = self.input_history.len();
         self.input.clear();
@@ -424,45 +436,39 @@ impl TuiState {
         Some(trimmed)
     }
 
-    // ── Autocomplete helpers ──
-
-    /// The canonical list of slash commands for autocomplete.
     pub fn slash_commands() -> &'static [(&'static str, &'static str)] {
         &[
-            ("/help",     "Show help message"),
-            ("/clear",    "Clear conversation"),
-            ("/config",   "Display current config"),
-            ("/goal",     "Start a multi-agent goal"),
-            ("/diff",     "Show active diff patch"),
-            ("/sessions", "Switch to sessions tab"),
+            ("/help", "Show built-in help"),
+            ("/clear", "Clear the conversation"),
+            ("/config", "Show runtime config"),
+            ("/goal", "Run a multi-agent goal"),
+            ("/diff", "Open the latest diff"),
+            ("/sessions", "Open saved sessions"),
         ]
     }
 
-    /// Returns the filtered list of commands matching the current input.
     pub fn get_autocomplete_matches(&self) -> Vec<(&'static str, &'static str)> {
         if !self.input.starts_with('/') || self.input.is_empty() {
             return Vec::new();
         }
+
         Self::slash_commands()
             .iter()
-            .filter(|(cmd, _)| cmd.starts_with(&self.input.as_str()))
+            .filter(|(command, _)| command.starts_with(self.input.as_str()))
             .copied()
             .collect()
     }
 
-    /// Whether the autocomplete popup is currently visible.
     pub fn is_autocomplete_active(&self) -> bool {
         self.input.starts_with('/') && !self.get_autocomplete_matches().is_empty()
     }
 
-    /// Move selection up in the autocomplete list.
     pub fn autocomplete_up(&mut self) {
         if self.autocomplete_idx > 0 {
             self.autocomplete_idx -= 1;
         }
     }
 
-    /// Move selection down in the autocomplete list.
     pub fn autocomplete_down(&mut self) {
         let count = self.get_autocomplete_matches().len();
         if count > 0 && self.autocomplete_idx + 1 < count {
@@ -470,176 +476,74 @@ impl TuiState {
         }
     }
 
-    /// Accept the currently selected autocomplete item, replacing input.
     pub fn autocomplete_accept(&mut self) {
-        let matches = self.get_autocomplete_matches();
-        if let Some((cmd, _)) = matches.get(self.autocomplete_idx) {
-            self.input = cmd.to_string();
+        if let Some((command, _)) = self.get_autocomplete_matches().get(self.autocomplete_idx) {
+            self.input = (*command).to_string();
             self.input_cursor = self.input.len();
             self.autocomplete_idx = 0;
         }
     }
 }
 
-// ─────────────────────────────────────────────
-// Main draw function
-// ─────────────────────────────────────────────
 pub fn draw(f: &mut Frame, state: &mut TuiState) {
-    // Root background
-    f.render_widget(
-        Block::default().style(Style::default().bg(Palette::BG)),
-        f.area(),
-    );
+    f.render_widget(Block::default().style(Style::default().bg(Palette::BG)), f.area());
 
-    let full = f.area();
-
-    // Outer vertical split: [header | body | keybindings]
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // header / tabs
-            Constraint::Min(0),    // body
-            Constraint::Length(1), // keybindings bar
-        ])
-        .split(full);
+        .constraints([Constraint::Length(4), Constraint::Min(0), Constraint::Length(1)])
+        .split(f.area());
 
     draw_header(f, outer[0], state);
     draw_body(f, outer[1], state);
-    draw_keys(f, outer[2], state);
+    draw_footer(f, outer[2], state);
 }
 
-// ─────────────────────────────────────────────
-// Header: logo + tab bar + session info
-// ─────────────────────────────────────────────
 fn draw_header(f: &mut Frame, area: Rect, state: &TuiState) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(22), // logo
-            Constraint::Min(0),     // tab bar
-            Constraint::Length(36), // session info
-        ])
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(3)])
         .split(area);
 
-    // Logo
-    let logo = Paragraph::new(Span::styled(
-        " ⚡ BarqCoder ",
-        Style::default()
-            .fg(Palette::ACCENT)
-            .add_modifier(Modifier::BOLD),
-    ))
+    let headline = Line::from(vec![
+        Span::styled("BarqCoder", Style::default().fg(Palette::BRAND).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("  model={}  session={}  ", state.current_model, trim_chars(&state.session_id, 24)),
+            Style::default().fg(Palette::TEXT_DIM),
+        ),
+        Span::styled(status_label(state), Style::default().fg(status_color(state)).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(
+            state.status_message.as_deref().unwrap_or(""),
+            Style::default().fg(if state.status_is_error { Palette::ERROR } else { Palette::TEXT_MUTED }),
+        ),
+    ]);
+
+    f.render_widget(Paragraph::new(headline), rows[0]);
+
+    let tabs = Tabs::new(vec![
+        Line::from(" Chat "),
+        Line::from(" Diff "),
+        Line::from(" Sessions "),
+        Line::from(format!(" Approvals [{}] ", state.action_queue.len())),
+    ])
+    .select(state.active_tab as usize)
     .block(
         Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .borders(Borders::TOP | Borders::BOTTOM)
             .border_style(Style::default().fg(Palette::BORDER))
-            .style(Style::default().bg(Palette::SURFACE)),
+            .style(Style::default().bg(Palette::PANEL)),
     )
-    .alignment(Alignment::Center);
-    f.render_widget(logo, cols[0]);
+    .highlight_style(
+        Style::default()
+            .fg(Palette::TEXT)
+            .bg(Palette::PANEL_ALT)
+            .add_modifier(Modifier::BOLD),
+    )
+    .divider(Span::styled(" ", Style::default().fg(Palette::TEXT_DIM)));
 
-    // Tab bar
-    let tab_titles: Vec<Line> = vec![
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled("󰭻 Chat", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-        ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(" Diff", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-        ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled("󱁻 Sessions", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-        ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled("󰒄 Sandbox", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(" [{}]", state.action_queue.len())),
-        ]),
-    ];
-
-    let tabs = Tabs::new(tab_titles)
-        .select(state.active_tab as usize)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE)),
-        )
-        .highlight_style(
-            Style::default()
-                .fg(Palette::ACCENT)
-                .bg(Palette::SURFACE2)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(Span::styled("│", Style::default().fg(Palette::BORDER)));
-    f.render_widget(tabs, cols[1]);
-
-    // Session / model info
-    let tok_color = if state.token_count > state.token_limit {
-        Palette::STATUS_ERR
-    } else if state.token_count > state.token_limit * 8 / 10 {
-        Palette::STATUS_WARN
-    } else {
-        Palette::STATUS_OK
-    };
-
-    let state_icon = if state.is_thinking {
-        format!("{} Thinking", spinner_frame(state.tick))
-    } else if state.is_indexing {
-        format!("{} Indexing", spinner_frame(state.tick))
-    } else {
-        "󰗡 Ready".to_string()
-    };
-
-    let info_lines = vec![
-        Line::from(vec![
-            Span::styled("  ", Style::default().fg(Palette::TEXT_DIM)),
-            Span::styled(
-                state.current_model.as_str(),
-                Style::default().fg(Palette::ACCENT2).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Tokens: ", Style::default().fg(Palette::TEXT_DIM)),
-            Span::styled(
-                format!("{}/{}", state.token_count, state.token_limit),
-                Style::default().fg(tok_color),
-            ),
-            Span::styled("  ", Style::default().fg(Palette::TEXT_DIM)),
-            Span::styled(
-                &state_icon,
-                Style::default()
-                    .fg(if state.is_thinking || state.is_indexing {
-                        Palette::ACCENT
-                    } else {
-                        Palette::STATUS_OK
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-    ];
-
-    let info = Paragraph::new(info_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE)),
-        )
-        .alignment(Alignment::Left);
-    f.render_widget(info, cols[2]);
+    f.render_widget(tabs, rows[1]);
 }
 
-// ─────────────────────────────────────────────
-// Body dispatcher
-// ─────────────────────────────────────────────
 fn draw_body(f: &mut Frame, area: Rect, state: &mut TuiState) {
     match state.active_tab {
         ActiveTab::Chat => draw_chat_tab(f, area, state),
@@ -649,15 +553,11 @@ fn draw_body(f: &mut Frame, area: Rect, state: &mut TuiState) {
     }
 }
 
-// ─────────────────────────────────────────────
-// Chat tab
-// ─────────────────────────────────────────────
 fn draw_chat_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    // Horizontal: sidebar | main
-    let h_chunks = if state.sidebar_visible {
+    let columns = if state.sidebar_visible {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(0)])
+            .constraints([Constraint::Length(30), Constraint::Min(0)])
             .split(area)
     } else {
         Layout::default()
@@ -667,907 +567,598 @@ fn draw_chat_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     };
 
     if state.sidebar_visible {
-        draw_sidebar(f, h_chunks[0], state);
+        draw_sidebar(f, columns[0], state);
     }
 
-    // Main area: chat history | tool log | input
-    let main_area = h_chunks[1];
-    let v_chunks = Layout::default()
+    let main = columns[1];
+    let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(8),    // chat
-            Constraint::Length(8), // tool log
-            Constraint::Length(3), // input
-        ])
-        .split(main_area);
+        .constraints([Constraint::Min(10), Constraint::Length(7), Constraint::Length(3)])
+        .split(main);
 
-    draw_chat_area(f, v_chunks[0], state);
-    draw_tool_log(f, v_chunks[1], state);
-    draw_input(f, v_chunks[2], state);
+    draw_chat_history(f, rows[0], state);
+    draw_tool_activity(f, rows[1], state);
+    draw_input_box(f, rows[2], state);
 }
 
-// ─────────────────────────────────────────────
-// Sidebar: file tree + context info
-// ─────────────────────────────────────────────
 fn draw_sidebar(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    let is_focused = state.focus == Focus::Sidebar;
-    let border_color = if is_focused {
-        Palette::BORDER_ACTIVE
-    } else {
-        Palette::BORDER
-    };
-
-    let chunks = Layout::default()
+    let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),    // file list
-            Constraint::Length(6), // barq context summary
-        ])
+        .constraints([Constraint::Length(8), Constraint::Min(0), Constraint::Length(6)])
         .split(area);
 
-    // File list
-    let files: Vec<ListItem> = state
-        .workspace_files
-        .iter()
-        .map(|f| {
-            let icon = if f.ends_with(".rs") {
-                "󱘗 "
-            } else if f.ends_with(".toml") {
-                " "
-            } else if f.ends_with(".md") {
-                "󰍔 "
-            } else {
-                "󰈔 "
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(icon, Style::default().fg(Palette::ACCENT2)),
-                Span::styled(f.as_str(), Style::default().fg(Palette::TEXT)),
-            ]))
-        })
-        .collect();
+    let help_lines = vec![
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
+            Span::styled(" send prompt", Style::default().fg(Palette::TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("Tab", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
+            Span::styled(" switch tabs", Style::default().fg(Palette::TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("Alt+S", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
+            Span::styled(" toggle sidebar", Style::default().fg(Palette::TEXT)),
+        ]),
+        Line::from(vec![
+            Span::styled("F1", Style::default().fg(Palette::KEY).add_modifier(Modifier::BOLD)),
+            Span::styled(" cycle focus", Style::default().fg(Palette::TEXT)),
+        ]),
+    ];
 
-    let file_list = List::new(files)
-        .block(
-            Block::default()
-                .title(Line::from(vec![
-                    Span::styled("  ", Style::default().fg(Palette::ACCENT)),
-                    Span::styled(
-                        "Workspace",
-                        Style::default()
-                            .fg(Palette::TEXT_BRIGHT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]))
-                .borders(Borders::ALL)
-                .border_type(if is_focused {
-                    BorderType::Double
-                } else {
-                    BorderType::Rounded
-                })
-                .border_style(Style::default().fg(border_color))
-                .style(Style::default().bg(Palette::SURFACE))
-                .padding(Padding::horizontal(1)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Palette::SURFACE2)
-                .fg(Palette::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
-
-    f.render_stateful_widget(file_list, chunks[0], &mut state.file_list_state);
-
-    // Context summary
-    let ctx_lines: Vec<Line> = state
-        .barq_context
-        .iter()
-        .rev()
-        .take(3)
-        .map(|l| {
-            Line::from(Span::styled(
-                format!("  {} ", l),
-                Style::default().fg(Palette::TEXT_DIM),
-            ))
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    let ctx_p = Paragraph::new(ctx_lines)
-        .block(
-            Block::default()
-                .title(Line::from(vec![
-                    Span::styled("  ", Style::default().fg(Palette::ACCENT2)),
-                    Span::styled(
-                        "BARQ Context",
-                        Style::default()
-                            .fg(Palette::TEXT_BRIGHT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE))
-                .padding(Padding::horizontal(1)),
-        )
+    let help = Paragraph::new(help_lines)
+        .block(panel_block("Quick Help", state.focus == Focus::Sidebar))
         .wrap(Wrap { trim: true });
-    f.render_widget(ctx_p, chunks[1]);
-}
+    f.render_widget(help, rows[0]);
 
-// ─────────────────────────────────────────────
-// Chat area
-// ─────────────────────────────────────────────
-fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    let is_focused = state.focus == Focus::Chat;
-    let border_color = if is_focused {
-        Palette::BORDER_ACTIVE
+    let items: Vec<ListItem> = if state.workspace_files.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "No workspace files indexed yet.",
+            Style::default().fg(Palette::TEXT_DIM),
+        )))]
     } else {
-        Palette::BORDER
+        state
+            .workspace_files
+            .iter()
+            .map(|path| ListItem::new(Line::from(Span::styled(path.as_str(), Style::default().fg(Palette::TEXT)))))
+            .collect()
     };
 
-    // Build rich lines
-    let mut lines: Vec<Line> = Vec::new();
-    for msg in &state.messages {
-        match &msg.kind {
-            MessageKind::User => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        " ▶ You  ",
-                        Style::default()
-                            .fg(Palette::USER_MSG)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "─".repeat(area.width.saturating_sub(12) as usize),
-                        Style::default().fg(Palette::BORDER),
-                    ),
-                ]));
-                for l in msg.content.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("   {} ", l),
-                        Style::default().fg(Palette::USER_MSG),
-                    )));
-                }
-                lines.push(Line::raw(""));
-            }
-            MessageKind::Agent => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        " 󰭻 BarqCoder  ",
-                        Style::default()
-                            .fg(Palette::AGENT_MSG)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "─".repeat(area.width.saturating_sub(16) as usize),
-                        Style::default().fg(Palette::BORDER),
-                    ),
-                ]));
-                for l in msg.content.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("   {} ", l),
-                        Style::default().fg(Palette::TEXT),
-                    )));
-                }
-                lines.push(Line::raw(""));
-            }
-            MessageKind::ToolCall => {
-                for l in msg.content.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  TOOL CALL  ",
-                            Style::default().fg(Palette::TOOL_CALL).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{} ", l),
-                            Style::default().fg(Palette::TOOL_CALL),
-                        ),
-                    ]));
-                }
-            }
-            MessageKind::ToolResult => {
-                for l in msg.content.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "  RESULT     ",
-                            Style::default().fg(Palette::TOOL_RESULT).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{} ", l),
-                            Style::default().fg(Palette::TOOL_RESULT),
-                        ),
-                    ]));
-                }
-            }
-            MessageKind::System => {
-                lines.push(Line::from(Span::styled(
-                    format!("  ◆ {} ", msg.content),
-                    Style::default()
-                        .fg(Palette::TEXT_DIM)
-                        .add_modifier(Modifier::ITALIC),
-                )));
-                lines.push(Line::raw(""));
-            }
-            MessageKind::Error => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "  ERROR  ",
-                        Style::default()
-                            .fg(Palette::ERROR_MSG)
-                            .add_modifier(Modifier::BOLD | Modifier::RAPID_BLINK),
-                    ),
-                    Span::styled(
-                        format!("{} ", msg.content),
-                        Style::default().fg(Palette::ERROR_MSG),
-                    ),
-                ]));
-                lines.push(Line::raw(""));
-            }
+    let list = List::new(items)
+        .block(panel_block("Workspace", state.focus == Focus::Sidebar))
+        .highlight_style(
+            Style::default()
+                .bg(Palette::PANEL_ALT)
+                .fg(Palette::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, rows[1], &mut state.file_list_state);
+
+    let context_lines = if state.barq_context.is_empty() {
+        vec![Line::from(Span::styled(
+            "BARQ context will appear here when available.",
+            Style::default().fg(Palette::TEXT_DIM),
+        ))]
+    } else {
+        state
+            .barq_context
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .map(|line| Line::from(Span::styled(line.as_str(), Style::default().fg(Palette::TEXT))))
+            .collect()
+    };
+
+    let context = Paragraph::new(context_lines)
+        .block(panel_block("Context", false))
+        .wrap(Wrap { trim: true });
+    f.render_widget(context, rows[2]);
+}
+
+fn draw_chat_history(f: &mut Frame, area: Rect, state: &mut TuiState) {
+    let mut lines = Vec::new();
+
+    for message in &state.messages {
+        let (label, label_color, body_color) = match message.kind {
+            MessageKind::User => ("You", Palette::USER, Palette::TEXT),
+            MessageKind::Agent => ("Barq", Palette::AGENT, Palette::TEXT),
+            MessageKind::ToolCall => ("Tool", Palette::TOOL, Palette::TOOL),
+            MessageKind::ToolResult => ("Result", Palette::RESULT, Palette::RESULT),
+            MessageKind::System => ("Note", Palette::TEXT_DIM, Palette::TEXT_DIM),
+            MessageKind::Error => ("Error", Palette::ERROR, Palette::ERROR),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("[{}] ", label),
+                Style::default().fg(label_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                trim_chars(message.content.lines().next().unwrap_or(""), 120),
+                Style::default().fg(body_color),
+            ),
+        ]));
+
+        for line in message.content.lines().skip(1) {
+            lines.push(Line::from(Span::styled(
+                format!("      {}", line),
+                Style::default().fg(body_color),
+            )));
         }
+        lines.push(Line::raw(""));
     }
 
-    // If thinking, append animated "..." line
     if state.is_thinking {
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" {} ", spinner_frame(state.tick)),
-                Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+                format!("[{}] ", spinner_frame(state.tick)),
+                Style::default().fg(Palette::BRAND).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "BarqCoder is thinking…",
-                Style::default()
-                    .fg(Palette::TEXT_DIM)
-                    .add_modifier(Modifier::ITALIC),
-            ),
+            Span::styled("Working...", Style::default().fg(Palette::TEXT_DIM)),
         ]));
     }
 
-    let total_lines = lines.len();
-    let available_height = area.height.saturating_sub(2) as usize;
-    let scroll = if total_lines > available_height {
-        // auto-follow bottom unless user has scrolled up
-        if state.chat_scroll == usize::MAX || state.chat_scroll + available_height >= total_lines {
-            // Update state so internal offset isn't left at MAX
-            let bottom = total_lines.saturating_sub(available_height);
-            state.chat_scroll = bottom;
-            bottom
-        } else {
-            state.chat_scroll
-        }
-    } else {
-        0
-    };
-
-    // Scrollbar
-    let mut scrollbar_state = ScrollbarState::new(total_lines.saturating_sub(available_height))
-        .position(scroll);
-
-    let spinner_title = if state.is_thinking {
-        format!(" {} BarqCoder Chat ", spinner_frame(state.tick))
-    } else {
-        " 󰭻 BarqCoder Chat ".to_string()
-    };
-
-    let chat_p = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .title(Line::from(vec![
-                    Span::styled(
-                        spinner_title,
-                        Style::default()
-                            .fg(Palette::ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]))
-                .borders(Borders::ALL)
-                .border_type(if is_focused {
-                    BorderType::Double
-                } else {
-                    BorderType::Rounded
-                })
-                .border_style(Style::default().fg(border_color))
-                .style(Style::default().bg(Palette::SURFACE)),
-        )
-        .scroll((scroll as u16, 0))
-        .wrap(Wrap { trim: false });
-    f.render_widget(chat_p, area);
-
-    f.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"))
-            .track_symbol(Some("│"))
-            .thumb_symbol("█")
-            .style(Style::default().fg(Palette::BORDER)),
-        area.inner(Margin { vertical: 1, horizontal: 0 }),
-        &mut scrollbar_state,
+    render_lines_panel(
+        f,
+        area,
+        lines,
+        &mut state.chat_scroll,
+        panel_block("Conversation", state.focus == Focus::Chat),
     );
 }
 
-// ─────────────────────────────────────────────
-// Tool log
-// ─────────────────────────────────────────────
-fn draw_tool_log(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    let is_focused = state.focus == Focus::ToolLog;
-    let border_color = if is_focused {
-        Palette::BORDER_ACTIVE
+fn draw_tool_activity(f: &mut Frame, area: Rect, state: &mut TuiState) {
+    let mut lines = Vec::new();
+
+    if let Some(tool) = &state.current_tool {
+        lines.push(Line::from(vec![
+            Span::styled("Active ", Style::default().fg(Palette::WARNING).add_modifier(Modifier::BOLD)),
+            Span::styled(tool.as_str(), Style::default().fg(Palette::TEXT)),
+        ]));
+        lines.push(Line::raw(""));
+    }
+
+    if state.tool_log.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Tool activity will appear here.",
+            Style::default().fg(Palette::TEXT_DIM),
+        )));
     } else {
-        Palette::BORDER
+        for entry in &state.tool_log {
+            lines.push(Line::from(Span::styled(entry.as_str(), Style::default().fg(Palette::TEXT))));
+        }
+    }
+
+    render_lines_panel(
+        f,
+        area,
+        lines,
+        &mut state.tool_scroll,
+        panel_block("Tool Activity", state.focus == Focus::ToolLog),
+    );
+}
+
+fn draw_input_box(f: &mut Frame, area: Rect, state: &mut TuiState) {
+    let before = &state.input[..state.input_cursor];
+    let after = &state.input[state.input_cursor..];
+    let cursor_width = after.chars().next().map(|ch| ch.len_utf8()).unwrap_or(0);
+    let cursor = if cursor_width == 0 { " " } else { &after[..cursor_width] };
+    let after_rest = if cursor_width == 0 { "" } else { &after[cursor_width..] };
+
+    let title = match state.status_message.as_deref() {
+        Some(message) if !message.is_empty() => format!("Composer  {}", trim_chars(message, 60)),
+        _ => "Composer".to_string(),
     };
 
-    let tool_title = match &state.current_tool {
-        Some(t) => Line::from(vec![
-            Span::styled(
-                "  Tool Activity ",
-                Style::default()
-                    .fg(Palette::TOOL_CALL)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("[Active: {}] ", t),
-                Style::default()
-                    .fg(Palette::WARN_MSG)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{}", spinner_frame(state.tick)),
-                Style::default().fg(Palette::ACCENT),
-            ),
-        ]),
-        None => Line::from(Span::styled(
-            "  Tool Activity ",
+    let input = Paragraph::new(Line::from(vec![
+        Span::styled("> ", Style::default().fg(Palette::BRAND).add_modifier(Modifier::BOLD)),
+        Span::styled(before, Style::default().fg(Palette::TEXT)),
+        Span::styled(
+            cursor,
             Style::default()
-                .fg(Palette::TOOL_CALL)
+                .fg(Palette::PANEL)
+                .bg(Palette::TEXT)
                 .add_modifier(Modifier::BOLD),
-        )),
+        ),
+        Span::styled(after_rest, Style::default().fg(Palette::TEXT)),
+    ]))
+    .block(panel_block(&title, state.focus == Focus::Input))
+    .alignment(Alignment::Left)
+    .wrap(Wrap { trim: false });
+
+    f.render_widget(input, area);
+
+    if state.is_autocomplete_active() {
+        draw_autocomplete_popup(f, area, state);
+    }
+}
+
+fn draw_autocomplete_popup(f: &mut Frame, area: Rect, state: &TuiState) {
+    let matches = state.get_autocomplete_matches();
+    let popup_height = (matches.len() as u16 + 2).min(8);
+    let popup_width = area.width.min(44);
+    let popup_area = Rect {
+        x: area.x,
+        y: area.y.saturating_sub(popup_height),
+        width: popup_width,
+        height: popup_height,
     };
 
-    let log_lines: Vec<Line> = state
-        .tool_log
+    let lines: Vec<Line> = matches
         .iter()
-        .map(|entry| {
-            let (icon, color) = if entry.contains("Calling") {
-                ("▶ ", Palette::TOOL_CALL)
-            } else if entry.contains("Result") {
-                ("◀ ", Palette::TOOL_RESULT)
+        .enumerate()
+        .map(|(idx, (command, desc))| {
+            let style = if idx == state.autocomplete_idx {
+                Style::default()
+                    .fg(Palette::TEXT)
+                    .bg(Palette::PANEL_MUTED)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                ("  ", Palette::TEXT_DIM)
+                Style::default().fg(Palette::TEXT)
             };
+
             Line::from(vec![
-                Span::styled(icon, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                Span::styled(entry.as_str(), Style::default().fg(color)),
+                Span::styled(format!("{:<12}", command), style),
+                Span::styled(desc.to_string(), style),
             ])
         })
         .collect();
 
-    let total = log_lines.len();
-    let height = area.height.saturating_sub(2) as usize;
-    let scroll = if total > height {
-        (total - height) as u16
-    } else {
-        0
-    };
-
-    let tool_p = Paragraph::new(Text::from(log_lines))
+    let popup = Paragraph::new(lines)
         .block(
             Block::default()
-                .title(tool_title)
+                .title("Commands")
                 .borders(Borders::ALL)
-                .border_type(if is_focused {
-                    BorderType::Double
-                } else {
-                    BorderType::Rounded
-                })
-                .border_style(Style::default().fg(border_color))
-                .style(Style::default().bg(Palette::SURFACE))
+                .border_style(Style::default().fg(Palette::BORDER_ACTIVE))
+                .style(Style::default().bg(Palette::PANEL_ALT))
                 .padding(Padding::horizontal(1)),
         )
-        .scroll((scroll, 0))
         .wrap(Wrap { trim: true });
-    f.render_widget(tool_p, area);
+
+    f.render_widget(Clear, popup_area);
+    f.render_widget(popup, popup_area);
 }
 
-// ─────────────────────────────────────────────
-// Input box
-// ─────────────────────────────────────────────
-fn draw_input(f: &mut Frame, area: Rect, state: &TuiState) {
-    let is_focused = state.focus == Focus::Input;
-    let border_color = if is_focused {
-        Palette::BORDER_ACTIVE
-    } else {
-        Palette::BORDER
-    };
-
-    // Render cursor by splitting input at cursor position
-    let before_cursor = &state.input[..state.input_cursor];
-    let after_cursor = &state.input[state.input_cursor..];
-
-    let cursor_char = if after_cursor.is_empty() { " " } else { &after_cursor[..after_cursor.chars().next().map(|c| c.len_utf8()).unwrap_or(1)] };
-    let after_cursor_rest = if after_cursor.len() > cursor_char.len() { &after_cursor[cursor_char.len()..] } else { "" };
-
-
-    // Combine prompt + input
-    let full_input = Line::from(vec![
-        if state.is_thinking {
-            Span::styled(
-                format!(" {} › ", spinner_frame(state.tick)),
-                Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(" ❯ ", Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD))
-        },
-        Span::styled(before_cursor, Style::default().fg(Palette::TEXT_BRIGHT)),
-        Span::styled(
-            cursor_char,
-            Style::default()
-                .fg(Palette::BG)
-                .bg(Palette::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(after_cursor_rest, Style::default().fg(Palette::TEXT_BRIGHT)),
-    ]);
-
-    let input_p = Paragraph::new(full_input)
-        .block(
-            Block::default()
-                .title(Line::from(vec![
-                    Span::styled(
-                        " Input ",
-                        Style::default()
-                            .fg(Palette::TEXT_BRIGHT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "— /help for commands ",
-                        Style::default().fg(Palette::TEXT_DIM),
-                    ),
-                ]))
-                .borders(Borders::ALL)
-                .border_type(if is_focused {
-                    BorderType::Double
-                } else {
-                    BorderType::Rounded
-                })
-                .border_style(Style::default().fg(border_color))
-                .style(Style::default().bg(Palette::SURFACE)),
-        )
-        .wrap(Wrap { trim: false });
-    f.render_widget(input_p, area);
-
-    // Status bar inside input area (top-right corner)
-    if let Some(ref msg) = state.status_message {
-        let status_color = if state.status_is_error {
-            Palette::STATUS_ERR
-        } else {
-            Palette::STATUS_OK
-        };
-        let overlay = Paragraph::new(Span::styled(
-            format!(" {} ", msg),
-            Style::default().fg(status_color).add_modifier(Modifier::BOLD),
-        ));
-        // Render in a small overlay at bottom-right of chat area
-        let status_area = Rect {
-            x: area.x + area.width.saturating_sub(msg.len() as u16 + 6),
-            y: area.y,
-            width: (msg.len() as u16 + 4).min(area.width / 2),
-            height: 1,
-        };
-        f.render_widget(Clear, status_area);
-        f.render_widget(overlay, status_area);
-    }
-
-    // Autocomplete popup for '/' commands
-    if is_focused && state.is_autocomplete_active() {
-        let matched = state.get_autocomplete_matches();
-        let selected = state.autocomplete_idx;
-
-        let popup_height = matched.len() as u16 + 2;
-        let popup_width = 42u16.min(area.width.saturating_sub(4));
-        // Place just above the input box
-        let popup_area = Rect {
-            x: area.x + 2,
-            y: area.y.saturating_sub(popup_height),
-            width: popup_width,
-            height: popup_height,
-        };
-
-        let items: Vec<Line> = matched.iter().enumerate().map(|(i, (cmd, desc))| {
-            let prefix = if i == selected { "▸ " } else { "  " };
-            let label = format!("{}{:<12}{}", prefix, cmd, desc);
-            if i == selected {
-                Line::from(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Palette::BG)
-                        .bg(Palette::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ))
-            } else {
-                Line::from(Span::styled(label, Style::default().fg(Palette::TEXT_BRIGHT)))
-            }
-        }).collect();
-
-        let popup = Paragraph::new(items)
-            .block(
-                Block::default()
-                    .title(" Commands ↑↓ Enter ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Palette::ACCENT))
-                    .style(Style::default().bg(Palette::SURFACE2)),
-            );
-
-        f.render_widget(Clear, popup_area);
-        f.render_widget(popup, popup_area);
-    }
-}
-
-// ─────────────────────────────────────────────
-// Diff tab
-// ─────────────────────────────────────────────
 fn draw_diff_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    let total = state.diff_content.len();
-
-    if total == 0 {
+    if state.diff_content.is_empty() {
         let placeholder = Paragraph::new(vec![
-            Line::raw(""),
             Line::from(Span::styled(
-                "  No diff loaded yet.",
-                Style::default()
-                    .fg(Palette::TEXT_DIM)
-                    .add_modifier(Modifier::ITALIC),
-            )),
-            Line::raw(""),
-            Line::from(Span::styled(
-                "  Run a code edit from the Chat tab and the diff will appear here.",
+                "No diff is loaded yet.",
                 Style::default().fg(Palette::TEXT_DIM),
             )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "Run an edit or file mutation and the latest patch will appear here.",
+                Style::default().fg(Palette::TEXT_MUTED),
+            )),
         ])
-        .block(
-            Block::default()
-                .title(Line::from(Span::styled(
-                    "  Diff View ",
-                    Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
-                )))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE)),
-        )
-        .alignment(Alignment::Center);
+        .block(panel_block("Diff", false))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
         f.render_widget(placeholder, area);
         return;
     }
 
-    let diff_lines: Vec<Line> = state
+    let lines: Vec<Line> = state
         .diff_content
         .iter()
         .map(|line| {
-            if line.starts_with('+') {
-                Line::from(vec![
-                    Span::styled("+ ", Style::default().fg(Palette::DIFF_ADD).add_modifier(Modifier::BOLD)),
-                    Span::styled(&line[1..], Style::default().fg(Palette::DIFF_ADD)),
-                ])
+            let style = if line.starts_with('+') {
+                Style::default().fg(Palette::DIFF_ADD)
             } else if line.starts_with('-') {
-                Line::from(vec![
-                    Span::styled("- ", Style::default().fg(Palette::DIFF_DEL).add_modifier(Modifier::BOLD)),
-                    Span::styled(&line[1..], Style::default().fg(Palette::DIFF_DEL)),
-                ])
+                Style::default().fg(Palette::DIFF_DEL)
             } else if line.starts_with("@@") {
-                Line::from(Span::styled(
-                    line.as_str(),
-                    Style::default().fg(Palette::DIFF_HUNK).add_modifier(Modifier::BOLD),
-                ))
+                Style::default().fg(Palette::DIFF_HUNK).add_modifier(Modifier::BOLD)
             } else {
-                Line::from(Span::styled(
-                    format!("  {}", line),
-                    Style::default().fg(Palette::TEXT_DIM),
-                ))
-            }
+                Style::default().fg(Palette::TEXT)
+            };
+            Line::from(Span::styled(line.as_str(), style))
         })
         .collect();
 
-    let height = area.height.saturating_sub(2) as usize;
-    let scroll = state.diff_scroll.min(total.saturating_sub(height));
-    let mut scrollbar_state = ScrollbarState::new(total.saturating_sub(height)).position(scroll);
-
-    // Legend row at top
-    let _legend_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
-    let diff_area = Rect { x: area.x, y: area.y, width: area.width, height: area.height };
-
-    let diff_p = Paragraph::new(Text::from(diff_lines))
-        .block(
-            Block::default()
-                .title(Line::from(vec![
-                    Span::styled(
-                        "  Diff View ",
-                        Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("[{} lines] ", total),
-                        Style::default().fg(Palette::TEXT_DIM),
-                    ),
-                ]))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE))
-                .padding(Padding::horizontal(1)),
-        )
-        .scroll((scroll as u16, 0));
-    f.render_widget(diff_p, diff_area);
-
-    f.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"))
-            .thumb_symbol("█")
-            .style(Style::default().fg(Palette::BORDER)),
-        diff_area.inner(Margin { vertical: 1, horizontal: 0 }),
-        &mut scrollbar_state,
-    );
+    render_lines_panel(f, area, lines, &mut state.diff_scroll, panel_block("Diff", false));
 }
 
-// ─────────────────────────────────────────────
-// Sessions tab
-// ─────────────────────────────────────────────
 fn draw_sessions_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     if state.sessions.is_empty() {
-        let placeholder = Paragraph::new(vec![
-            Line::raw(""),
-            Line::from(Span::styled(
-                "  No saved sessions found.",
-                Style::default()
-                    .fg(Palette::TEXT_DIM)
-                    .add_modifier(Modifier::ITALIC),
-            )),
-            Line::raw(""),
-            Line::from(Span::styled(
-                "  Sessions are saved in <workspace>/.barqcoder/sessions/",
-                Style::default().fg(Palette::TEXT_DIM),
-            )),
-        ])
-        .block(
-            Block::default()
-                .title(Line::from(Span::styled(
-                    " 󱁻 Sessions ",
-                    Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
-                )))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE)),
-        )
-        .alignment(Alignment::Center);
+        let placeholder = Paragraph::new("No saved sessions found.")
+            .block(panel_block("Sessions", false))
+            .alignment(Alignment::Center);
         f.render_widget(placeholder, area);
         return;
     }
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(area);
 
     let items: Vec<ListItem> = state
         .sessions
         .iter()
-        .map(|s| {
-            let time = format_timestamp(s.created_at);
+        .map(|session| {
             ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled("  ", Style::default().fg(Palette::ACCENT2)),
-                    Span::styled(
-                        s.id.as_str(),
-                        Style::default()
-                            .fg(Palette::TEXT_BRIGHT)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("     ", Style::default()),
-                    Span::styled(
-                        format!("{} • {} events • {}", time, s.event_count, s.workspace),
-                        Style::default().fg(Palette::TEXT_DIM),
-                    ),
-                ]),
+                Line::from(Span::styled(
+                    trim_chars(&session.id, 42),
+                    Style::default().fg(Palette::TEXT).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!("{} events", session.event_count),
+                    Style::default().fg(Palette::TEXT_DIM),
+                )),
+                Line::from(Span::styled(
+                    trim_chars(&session.workspace, 42),
+                    Style::default().fg(Palette::TEXT_MUTED),
+                )),
                 Line::raw(""),
             ])
         })
         .collect();
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(Line::from(Span::styled(
-                    " 󱁻 Sessions ",
-                    Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
-                )))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE))
-                .padding(Padding::horizontal(1)),
-        )
+        .block(panel_block("Saved Sessions", false))
         .highlight_style(
             Style::default()
-                .bg(Palette::SURFACE2)
-                .fg(Palette::ACCENT)
+                .bg(Palette::PANEL_ALT)
+                .fg(Palette::TEXT)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("▶ ");
+        .highlight_symbol("> ");
+    f.render_stateful_widget(list, columns[0], &mut state.session_list_state);
 
-    f.render_stateful_widget(list, area, &mut state.session_list_state);
+    let selected = state
+        .session_list_state
+        .selected()
+        .and_then(|idx| state.sessions.get(idx));
+
+    let details = if let Some(session) = selected {
+        vec![
+            Line::from(vec![
+                Span::styled("Session ", Style::default().fg(Palette::TEXT_DIM)),
+                Span::styled(session.id.as_str(), Style::default().fg(Palette::TEXT).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::raw(""),
+            Line::from(format!("Workspace: {}", session.workspace)),
+            Line::from(format!("Created: {}", session.created_at)),
+            Line::from(format!("Events: {}", session.event_count)),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "Press Enter to replay this session into the chat tab.",
+                Style::default().fg(Palette::TEXT_MUTED),
+            )),
+        ]
+    } else {
+        vec![Line::from("Select a session to inspect it.")]
+    };
+
+    let detail_panel = Paragraph::new(details)
+        .block(panel_block("Session Details", false))
+        .wrap(Wrap { trim: true });
+    f.render_widget(detail_panel, columns[1]);
 }
 
-// ─────────────────────────────────────────────
-// Action Queue (Sandbox) tab
-// ─────────────────────────────────────────────
 fn draw_action_queue_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
     if state.action_queue.is_empty() {
         let placeholder = Paragraph::new(vec![
-            Line::raw(""),
             Line::from(Span::styled(
-                "  No pending actions in the sandbox.",
-                Style::default()
-                    .fg(Palette::TEXT_DIM)
-                    .add_modifier(Modifier::ITALIC),
+                "No pending approvals.",
+                Style::default().fg(Palette::TEXT_DIM),
             )),
             Line::raw(""),
+            Line::from(Span::styled(
+                "When a tool needs approval it will appear here.",
+                Style::default().fg(Palette::TEXT_MUTED),
+            )),
         ])
-        .block(
-            Block::default()
-                .title(Line::from(Span::styled(
-                    " 󰒄 Sandbox ",
-                    Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
-                )))
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE)),
-        )
-        .alignment(Alignment::Center);
+        .block(panel_block("Approvals", false))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
         f.render_widget(placeholder, area);
         return;
     }
 
-    let chunks = Layout::default()
+    let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
         .split(area);
 
-    let items: Vec<ListItem> = state.action_queue.iter().map(|a| {
-        let icon = match a.kind {
-            ActionKind::WriteFile { .. } => "📝",
-            ActionKind::ShellCommand { .. } => "💻",
-            ActionKind::ApplyVerifiedPatch { .. } => "✅",
-        };
-        let status = match a.approved {
-            Some(true) => Span::styled(" [Approved]", Style::default().fg(Palette::STATUS_OK)),
-            Some(false) => Span::styled(" [Rejected]", Style::default().fg(Palette::STATUS_ERR)),
-            None => Span::styled(" [Pending]", Style::default().fg(Palette::STATUS_WARN)),
-        };
-        ListItem::new(Line::from(vec![
-            Span::raw(format!("{} ", icon)),
-            Span::styled(a.label(), Style::default().fg(Palette::TEXT_BRIGHT)),
-            status,
-        ]))
-    }).collect();
+    let items: Vec<ListItem> = state
+        .action_queue
+        .iter()
+        .map(|action| {
+            let status = match action.approved {
+                Some(true) => "approved",
+                Some(false) => "denied",
+                None => "pending",
+            };
+            ListItem::new(vec![
+                Line::from(Span::styled(
+                    action.label(),
+                    Style::default().fg(Palette::TEXT).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!("{} via {}", status, action.agent),
+                    Style::default().fg(Palette::TEXT_DIM),
+                )),
+                Line::raw(""),
+            ])
+        })
+        .collect();
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(" Pending Actions ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::SURFACE)),
-        )
+        .block(panel_block("Pending Approvals", false))
         .highlight_style(
             Style::default()
-                .bg(Palette::SURFACE2)
-                .fg(Palette::ACCENT)
+                .bg(Palette::PANEL_ALT)
+                .fg(Palette::TEXT)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("▶ ");
+        .highlight_symbol("> ");
 
     let mut list_state = ListState::default();
-    list_state.select(Some(state.action_queue_selected));
-    f.render_stateful_widget(list, chunks[0], &mut list_state);
+    list_state.select(Some(state.action_queue_selected.min(state.action_queue.len() - 1)));
+    f.render_stateful_widget(list, columns[0], &mut list_state);
 
-    let preview_text = state.action_queue[state.action_queue_selected].preview().lines().enumerate().map(|(i, l)| {
-        let style = if l.starts_with('+') {
+    let selected = &state.action_queue[state.action_queue_selected.min(state.action_queue.len() - 1)];
+    let mut preview_lines = vec![
+        Line::from(Span::styled(
+            "Approve with Y, deny with N. Esc denies all pending requests.",
+            Style::default().fg(Palette::WARNING),
+        )),
+        Line::raw(""),
+    ];
+
+    match &selected.kind {
+        ActionKind::WriteFile { path, full_content, .. } => {
+            preview_lines.push(Line::from(format!("Target: {}", path)));
+            preview_lines.push(Line::from(format!(
+                "Buffered content size: {} chars",
+                full_content.chars().count()
+            )));
+            preview_lines.push(Line::raw(""));
+        }
+        ActionKind::ShellCommand { command, .. } => {
+            preview_lines.push(Line::from(format!("Command: {}", command)));
+            preview_lines.push(Line::raw(""));
+        }
+        ActionKind::ApplyVerifiedPatch { step_id, .. } => {
+            preview_lines.push(Line::from(format!("Verification step: {}", step_id)));
+            preview_lines.push(Line::raw(""));
+        }
+    }
+
+    for line in selected.preview().lines() {
+        let style = if line.starts_with('+') {
             Style::default().fg(Palette::DIFF_ADD)
-        } else if l.starts_with('-') {
+        } else if line.starts_with('-') {
             Style::default().fg(Palette::DIFF_DEL)
-        } else if l.starts_with("@@") {
+        } else if line.starts_with("@@") {
             Style::default().fg(Palette::DIFF_HUNK)
         } else {
             Style::default().fg(Palette::TEXT)
         };
-        Line::from(Span::styled(l, style))
-    }).collect::<Vec<_>>();
-
-    let preview = Paragraph::new(preview_text)
-        .block(
-            Block::default()
-                .title(" Preview ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Palette::BORDER))
-                .style(Style::default().bg(Palette::BG)),
-        )
-        .scroll((state.action_preview_scroll as u16, 0));
-
-    f.render_widget(preview, chunks[1]);
-}
-
-// ─────────────────────────────────────────────
-// Keybindings bar
-// ─────────────────────────────────────────────
-fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
-    let keys: &[(&str, &str)] = match state.active_tab {
-        ActiveTab::Chat => &[
-            ("Enter", "Send"),
-            ("↑/↓", "History"),
-            ("Tab", "Next Tab"),
-            ("Alt+S", "Toggle Sidebar"),
-            ("PgUp/Dn", "Scroll Chat"),
-            ("Esc", "Quit"),
-        ],
-        ActiveTab::Diff => &[
-            ("↑/↓", "Scroll Diff"),
-            ("Tab", "Next Tab"),
-            ("Esc", "Quit"),
-        ],
-        ActiveTab::Sessions => &[
-            ("↑/↓", "Select"),
-            ("Enter", "Replay"),
-            ("Tab", "Next Tab"),
-            ("Esc", "Quit"),
-        ],
-        ActiveTab::ActionQueue => &[
-            ("↑/↓", "Select"),
-            ("PgUp/Dn", "Scroll Preview"),
-            ("Y", "Approve"),
-            ("N", "Reject"),
-            ("Tab", "Next Tab"),
-            ("Esc", "Quit"),
-        ],
-    };
-
-    let mut spans: Vec<Span> = vec![Span::styled(" ", Style::default())];
-    for (key, desc) in keys {
-        spans.push(Span::styled(
-            format!(" {} ", key),
-            Style::default()
-                .fg(Palette::BG)
-                .bg(Palette::KEY_LABEL)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" {} ", desc),
-            Style::default().fg(Palette::KEY_HINT),
-        ));
-        spans.push(Span::styled("  ", Style::default()));
+        preview_lines.push(Line::from(Span::styled(line.to_string(), style)));
     }
 
-    let keys_bar = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(Palette::SURFACE2));
-    f.render_widget(keys_bar, area);
+    render_lines_panel(
+        f,
+        columns[1],
+        preview_lines,
+        &mut state.action_preview_scroll,
+        panel_block("Approval Preview", false),
+    );
 }
 
-// ─────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────
-fn format_timestamp(ts: u64) -> String {
-    // Very simple: just show as relative description
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let diff = now.saturating_sub(ts);
-    if diff < 60 {
-        format!("{}s ago", diff)
-    } else if diff < 3600 {
-        format!("{}m ago", diff / 60)
-    } else if diff < 86400 {
-        format!("{}h ago", diff / 3600)
+fn draw_footer(f: &mut Frame, area: Rect, state: &TuiState) {
+    let content = match state.active_tab {
+        ActiveTab::Chat => "Enter send  Up/Down history  F1 focus  Tab next tab  Shift+Tab prev tab  Alt+S toggle sidebar  Esc quit",
+        ActiveTab::Diff => "Up/Down scroll  PageUp/PageDown fast scroll  Home/End jump  Tab switch tabs  Esc quit",
+        ActiveTab::Sessions => "Up/Down select  Enter replay session  Tab switch tabs  Esc quit",
+        ActiveTab::ActionQueue => "Up/Down select  PageUp/PageDown preview scroll  Y approve  N deny  Esc deny all or quit",
+    };
+
+    let footer = Paragraph::new(Span::styled(content, Style::default().fg(Palette::TEXT_DIM)))
+        .alignment(Alignment::Left)
+        .style(Style::default().bg(Palette::BG));
+    f.render_widget(footer, area);
+}
+
+fn panel_block(title: &str, focused: bool) -> Block<'_> {
+    Block::default()
+        .title(Span::styled(
+            format!(" {} ", title),
+            Style::default()
+                .fg(if focused { Palette::TEXT } else { Palette::TEXT_DIM })
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if focused { Palette::BORDER_ACTIVE } else { Palette::BORDER }))
+        .style(Style::default().bg(Palette::PANEL))
+        .padding(Padding::horizontal(1))
+}
+
+fn render_lines_panel(
+    f: &mut Frame,
+    area: Rect,
+    lines: Vec<Line>,
+    scroll_state: &mut usize,
+    block: Block<'_>,
+) {
+    let total = lines.len();
+    let visible = area.height.saturating_sub(2) as usize;
+    let scroll = resolve_scroll(*scroll_state, total, visible);
+    *scroll_state = scroll;
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .scroll((scroll as u16, 0))
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, area);
+
+    if total > visible && visible > 0 {
+        let mut scrollbar_state = ScrollbarState::new(total.saturating_sub(visible)).position(scroll);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+fn resolve_scroll(requested: usize, total_lines: usize, visible_lines: usize) -> usize {
+    if total_lines <= visible_lines {
+        return 0;
+    }
+
+    let bottom = total_lines.saturating_sub(visible_lines);
+    if requested == usize::MAX {
+        bottom
     } else {
-        format!("{}d ago", diff / 86400)
+        requested.min(bottom)
+    }
+}
+
+fn trim_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let mut trimmed = String::new();
+    for ch in text.chars().take(max_chars.saturating_sub(1)) {
+        trimmed.push(ch);
+    }
+    trimmed.push('…');
+    trimmed
+}
+
+fn status_label(state: &TuiState) -> String {
+    if state.is_indexing {
+        format!("{} indexing", spinner_frame(state.tick))
+    } else if state.is_thinking {
+        match &state.current_tool {
+            Some(tool) => format!("{} running {}", spinner_frame(state.tick), tool),
+            None => format!("{} thinking", spinner_frame(state.tick)),
+        }
+    } else if !state.action_queue.is_empty() {
+        format!("{} approval waiting", state.action_queue.len())
+    } else {
+        "ready".to_string()
+    }
+}
+
+fn status_color(state: &TuiState) -> Color {
+    if state.status_is_error {
+        Palette::ERROR
+    } else if !state.action_queue.is_empty() {
+        Palette::WARNING
+    } else if state.is_thinking || state.is_indexing {
+        Palette::BRAND
+    } else {
+        Palette::SUCCESS
     }
 }
