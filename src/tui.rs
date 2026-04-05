@@ -1119,26 +1119,72 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 lines.push(Line::raw(""));
             }
             MessageKind::ToolCall => {
-                for l in msg.content.lines() {
+                // Show first line as header, indent rest
+                let content_lines: Vec<&str> = msg.content.lines().collect();
+                if let Some(first) = content_lines.first() {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            "  TOOL CALL  ",
+                            " \u{25B6} ",
                             Style::default().fg(Palette::TOOL_CALL).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!("{} ", l),
+                            " TOOL ",
+                            Style::default()
+                                .fg(Palette::BG)
+                                .bg(Palette::TOOL_CALL)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" {} ", first),
                             Style::default().fg(Palette::TOOL_CALL),
+                        ),
+                    ]));
+                }
+                for l in content_lines.iter().skip(1) {
+                    lines.push(Line::from(vec![
+                        Span::styled("      ", Style::default()),
+                        Span::styled(
+                            format!("{} ", l),
+                            Style::default().fg(Palette::TEXT_DIM),
                         ),
                     ]));
                 }
             }
             MessageKind::ToolResult => {
-                for l in msg.content.lines() {
+                let content_lines: Vec<&str> = msg.content.lines().collect();
+                let line_count = content_lines.len();
+                // Show compact result with line count
+                if let Some(first) = content_lines.first() {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            "  RESULT     ",
+                            " \u{25C0} ",
                             Style::default().fg(Palette::TOOL_RESULT).add_modifier(Modifier::BOLD),
                         ),
+                        Span::styled(
+                            " RESULT ",
+                            Style::default()
+                                .fg(Palette::BG)
+                                .bg(Palette::TOOL_RESULT)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" {} ", first),
+                            Style::default().fg(Palette::TOOL_RESULT),
+                        ),
+                        if line_count > 1 {
+                            Span::styled(
+                                format!("(+{} lines)", line_count - 1),
+                                Style::default().fg(Palette::TEXT_DIM),
+                            )
+                        } else {
+                            Span::styled("", Style::default())
+                        },
+                    ]));
+                }
+                // Show up to 5 detail lines
+                for l in content_lines.iter().skip(1).take(5) {
+                    lines.push(Line::from(vec![
+                        Span::styled("        ", Style::default()),
                         Span::styled(
                             format!("{} ", l),
                             Style::default().fg(Palette::TOOL_RESULT),
@@ -1497,30 +1543,68 @@ fn draw_diff_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
         return;
     }
 
+    // Count additions and deletions for summary
+    let additions = state.diff_content.iter().filter(|l| l.starts_with('+')).count();
+    let deletions = state.diff_content.iter().filter(|l| l.starts_with('-')).count();
+
     let diff_lines: Vec<Line> = state
         .diff_content
         .iter()
-        .map(|line| {
-            if line.starts_with('+') {
+        .enumerate()
+        .map(|(idx, line)| {
+            let line_no = Span::styled(
+                format!("{:>4} ", idx + 1),
+                Style::default().fg(Palette::TEXT_DIM),
+            );
+            if line.starts_with("+++") || line.starts_with("---") {
+                // File headers
                 Line::from(vec![
-                    Span::styled("+ ", Style::default().fg(Palette::DIFF_ADD).add_modifier(Modifier::BOLD)),
-                    Span::styled(&line[1..], Style::default().fg(Palette::DIFF_ADD)),
+                    line_no,
+                    Span::styled(
+                        line.as_str(),
+                        Style::default().fg(Palette::TEXT_BRIGHT).add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else if line.starts_with('+') {
+                Line::from(vec![
+                    line_no,
+                    Span::styled(
+                        "+",
+                        Style::default().fg(Palette::DIFF_ADD).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        line[1..].to_string(),
+                        Style::default().fg(Palette::DIFF_ADD).bg(Color::Rgb(20, 40, 25)),
+                    ),
                 ])
             } else if line.starts_with('-') {
                 Line::from(vec![
-                    Span::styled("- ", Style::default().fg(Palette::DIFF_DEL).add_modifier(Modifier::BOLD)),
-                    Span::styled(&line[1..], Style::default().fg(Palette::DIFF_DEL)),
+                    line_no,
+                    Span::styled(
+                        "-",
+                        Style::default().fg(Palette::DIFF_DEL).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        line[1..].to_string(),
+                        Style::default().fg(Palette::DIFF_DEL).bg(Color::Rgb(50, 20, 20)),
+                    ),
                 ])
             } else if line.starts_with("@@") {
-                Line::from(Span::styled(
-                    line.as_str(),
-                    Style::default().fg(Palette::DIFF_HUNK).add_modifier(Modifier::BOLD),
-                ))
+                Line::from(vec![
+                    line_no,
+                    Span::styled(
+                        line.as_str(),
+                        Style::default().fg(Palette::DIFF_HUNK).add_modifier(Modifier::BOLD),
+                    ),
+                ])
             } else {
-                Line::from(Span::styled(
-                    format!("  {}", line),
-                    Style::default().fg(Palette::TEXT_DIM),
-                ))
+                Line::from(vec![
+                    line_no,
+                    Span::styled(
+                        format!(" {}", line),
+                        Style::default().fg(Palette::TEXT_DIM),
+                    ),
+                ])
             }
         })
         .collect();
@@ -1542,9 +1626,19 @@ fn draw_diff_tab(f: &mut Frame, area: Rect, state: &mut TuiState) {
                         Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("[{} lines] ", total),
+                        format!("[{} lines ", total),
                         Style::default().fg(Palette::TEXT_DIM),
                     ),
+                    Span::styled(
+                        format!("+{}", additions),
+                        Style::default().fg(Palette::DIFF_ADD),
+                    ),
+                    Span::styled("/", Style::default().fg(Palette::TEXT_DIM)),
+                    Span::styled(
+                        format!("-{}", deletions),
+                        Style::default().fg(Palette::DIFF_DEL),
+                    ),
+                    Span::styled("] ", Style::default().fg(Palette::TEXT_DIM)),
                 ]))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
