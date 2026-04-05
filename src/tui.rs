@@ -9,6 +9,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::markdown;
+
 // ─────────────────────────────────────────────
 // Palette
 // ─────────────────────────────────────────────
@@ -1043,21 +1045,27 @@ fn draw_chat_area(f: &mut Frame, area: Rect, state: &mut TuiState) {
             MessageKind::Agent => {
                 lines.push(Line::from(vec![
                     Span::styled(
-                        " 󰭻 BarqCoder  ",
+                        " << BarqCoder  ",
                         Style::default()
                             .fg(Palette::AGENT_MSG)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        "─".repeat(area.width.saturating_sub(16) as usize),
+                        "\u{2500}".repeat(content_width.saturating_sub(16)),
                         Style::default().fg(Palette::BORDER),
                     ),
                 ]));
-                for l in msg.content.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("   {} ", l),
-                        Style::default().fg(Palette::TEXT),
-                    )));
+                // Render agent messages with markdown
+                let md_lines = markdown::render_markdown(
+                    &msg.content,
+                    content_width.saturating_sub(6),
+                );
+                for md_line in md_lines {
+                    let mut indented = vec![Span::styled("   ", Style::default())];
+                    indented.extend(md_line.spans.into_iter().map(|s| {
+                        Span::styled(s.content.into_owned(), s.style)
+                    }));
+                    lines.push(Line::from(indented));
                 }
                 lines.push(Line::raw(""));
             }

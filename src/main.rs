@@ -27,6 +27,7 @@ mod cost_tracker;
 mod daemon;
 mod lsp;
 mod macro_goals;
+mod markdown;
 mod memory;
 mod mcp;
 mod orchestrator;
