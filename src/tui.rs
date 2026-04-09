@@ -988,7 +988,6 @@ fn draw_file_preview(f: &mut Frame, area: Rect, state: &mut TuiState) {
         .wrap(Wrap { trim: false });
     f.render_widget(preview, area);
 }
-
 fn draw_input(f: &mut Frame, area: Rect, state: &TuiState) {
     let title = if state.input.is_empty() {
         "Composer".to_string()
@@ -1286,6 +1285,17 @@ fn draw_permission_prompt(f: &mut Frame, prompt: &PermissionPrompt) {
             Style::default().fg(Palette::WARN_MSG).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
+        Line::from(vec![
+            Span::styled(" Y ", Style::default().fg(Palette::BG).bg(Palette::STATUS_OK).add_modifier(Modifier::BOLD)),
+            Span::styled(" Approve  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled(" A ", Style::default().fg(Palette::BG).bg(Palette::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(" Trust tool  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled(" N ", Style::default().fg(Palette::BG).bg(Palette::STATUS_ERR).add_modifier(Modifier::BOLD)),
+            Span::styled(" Deny  ", Style::default().fg(Palette::TEXT_DIM)),
+            Span::styled(" Esc ", Style::default().fg(Palette::BG).bg(Palette::TEXT_DIM).add_modifier(Modifier::BOLD)),
+            Span::styled(" Deny all", Style::default().fg(Palette::TEXT_DIM)),
+        ]),
+        Line::raw(""),
         Line::from(Span::styled(
             format!("Queued approvals: {}", prompt.queue_len),
             Style::default().fg(Palette::TEXT_DIM),
@@ -1348,6 +1358,138 @@ fn draw_keys(f: &mut Frame, area: Rect, state: &TuiState) {
 
     let footer = Paragraph::new(lines).style(Style::default().bg(Palette::SURFACE2));
     f.render_widget(footer, area);
+}
+
+// ─────────────────────────────────────────────
+// Input line builder — handles multi-line with cursor
+// ─────────────────────────────────────────────
+fn build_input_lines<'a>(input: &str, cursor: usize, is_thinking: bool, tick: usize) -> Vec<Line<'a>> {
+    let prompt_span = if is_thinking {
+        Span::styled(
+            format!(" {} > ", spinner_frame(tick)),
+            Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(" > ", Style::default().fg(Palette::ACCENT).add_modifier(Modifier::BOLD))
+    };
+
+    if input.is_empty() {
+        return vec![Line::from(vec![
+            prompt_span,
+            Span::styled(
+                " ",
+                Style::default().fg(Palette::BG).bg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ])];
+    }
+
+    let mut lines_text: Vec<&str> = input.split('\n').collect();
+    if input.ends_with('\n') {
+        lines_text.push("");
+    }
+
+    let mut cursor_line = 0usize;
+    let mut cursor_col = 0usize;
+    let mut pos = 0usize;
+    for (i, line_text) in lines_text.iter().enumerate() {
+        let line_end = pos + line_text.len();
+        if cursor <= line_end {
+            cursor_line = i;
+            cursor_col = cursor - pos;
+            break;
+        }
+        pos = line_end + 1;
+        cursor_line = i + 1;
+        cursor_col = 0;
+    }
+
+    let mut result = Vec::new();
+    for (i, line_text) in lines_text.iter().enumerate() {
+        let prefix = if i == 0 {
+            prompt_span.clone()
+        } else {
+            Span::styled("   ", Style::default().fg(Palette::TEXT_DIM))
+        };
+
+        if i == cursor_line {
+            let safe_col = cursor_col.min(line_text.len());
+            let before = &line_text[..safe_col];
+            let cursor_char = if safe_col < line_text.len() {
+                let ch = line_text[safe_col..].chars().next().unwrap();
+                &line_text[safe_col..safe_col + ch.len_utf8()]
+            } else {
+                " "
+            };
+            let after = if safe_col < line_text.len() {
+                let ch_len = line_text[safe_col..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                &line_text[safe_col + ch_len..]
+            } else {
+                ""
+            };
+
+            result.push(Line::from(vec![
+                prefix,
+                Span::styled(before.to_string(), Style::default().fg(Palette::TEXT_BRIGHT)),
+                Span::styled(
+                    cursor_char.to_string(),
+                    Style::default().fg(Palette::BG).bg(Palette::ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(after.to_string(), Style::default().fg(Palette::TEXT_BRIGHT)),
+            ]));
+        } else {
+            result.push(Line::from(vec![
+                prefix,
+                Span::styled(line_text.to_string(), Style::default().fg(Palette::TEXT_BRIGHT)),
+            ]));
+        }
+    }
+
+    result
+}
+
+// ─────────────────────────────────────────────
+// Word-boundary text wrapping
+// ─────────────────────────────────────────────
+fn wrap_text_word(text: &str, max_width: usize) -> Vec<String> {
+    let width = max_width.max(1);
+    let mut result = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            result.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for word in line.split_inclusive(char::is_whitespace) {
+            let wlen = word.chars().count();
+            if current_width + wlen > width && current_width > 0 {
+                result.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+            if wlen > width {
+                for ch in word.chars() {
+                    if current_width >= width {
+                        result.push(current);
+                        current = String::new();
+                        current_width = 0;
+                    }
+                    current.push(ch);
+                    current_width += 1;
+                }
+            } else {
+                current.push_str(word);
+                current_width += wlen;
+            }
+        }
+        if !current.is_empty() {
+            result.push(current);
+        }
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
 }
 
 // ─────────────────────────────────────────────
