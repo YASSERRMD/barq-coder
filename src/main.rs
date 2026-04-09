@@ -68,6 +68,7 @@ struct App {
     pending_budget_request: Option<tokio::sync::oneshot::Sender<bool>>,
     cost: CostTracker,
     skip_permissions: bool,
+    streaming_assistant_raw: String,
 }
 
 struct PendingPermissionRequest {
@@ -212,6 +213,133 @@ fn describe_timestamp(ts: u64) -> String {
         format!("{}h ago", diff / 3600)
     } else {
         format!("{}d ago", diff / 86400)
+    }
+}
+
+fn strip_fenced_block(text: &str) -> &str {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed;
+    }
+
+    let Some(first_newline) = trimmed.find('\n') else {
+        return trimmed;
+    };
+
+    let body = &trimmed[first_newline + 1..];
+    body.strip_suffix("```").unwrap_or(body).trim()
+}
+
+fn extract_preferred_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => {
+            let cleaned = text.trim();
+            (!cleaned.is_empty()).then(|| cleaned.to_string())
+        }
+        serde_json::Value::Object(map) => {
+            for key in ["final_answer", "answer", "content", "message", "reasoning"] {
+                if let Some(text) = map.get(key).and_then(extract_preferred_text) {
+                    if !text.trim().is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(items) => {
+            let pieces = items
+                .iter()
+                .filter_map(extract_preferred_text)
+                .collect::<Vec<_>>();
+            if pieces.is_empty() {
+                None
+            } else {
+                Some(pieces.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_json_string_field(raw: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{}\"", field);
+    let start = raw.find(&needle)?;
+    let after_field = &raw[start + needle.len()..];
+    let colon = after_field.find(':')?;
+    let mut chars = after_field[colon + 1..].trim_start().chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+
+    let mut extracted = String::new();
+    let mut escaped = false;
+    for ch in chars {
+        if escaped {
+            extracted.push(match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '"' => '"',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(extracted),
+            other => extracted.push(other),
+        }
+    }
+
+    (!extracted.trim().is_empty()).then_some(extracted)
+}
+
+fn sanitize_assistant_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let unfenced = strip_fenced_block(trimmed);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(unfenced) {
+        if let Some(text) = extract_preferred_text(&value) {
+            return text;
+        }
+    }
+
+    for field in ["final_answer", "answer", "content", "message", "reasoning"] {
+        if let Some(text) = extract_json_string_field(unfenced, field) {
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+    }
+
+    let looks_structured = unfenced.starts_with('{')
+        || unfenced.starts_with('[')
+        || trimmed.starts_with("```json")
+        || trimmed.starts_with("```JSON");
+
+    if looks_structured {
+        String::new()
+    } else {
+        raw.to_string()
+    }
+}
+
+fn set_agent_transcript_message(tui: &mut TuiState, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    match tui.messages.last_mut() {
+        Some(last) if matches!(last.kind, tui::MessageKind::Agent) => {
+            last.content = text.to_string();
+        }
+        _ => tui.add_message(ChatMessage::agent(text)),
     }
 }
 
@@ -806,6 +934,7 @@ impl App {
             pending_budget_request: None,
             cost: CostTracker::new(),
             skip_permissions: cli.dangerously_skip_permissions,
+            streaming_assistant_raw: String::new(),
         };
         refresh_tui_metadata(&mut app);
         app
@@ -819,7 +948,12 @@ impl App {
                     self.tui.add_message(ChatMessage::user(&content));
                 }
                 SessionEvent::AssistantMessage { content, .. } => {
-                    self.tui.append_agent_token(&content);
+                    let rendered = sanitize_assistant_text(&content);
+                    if rendered.trim().is_empty() {
+                        self.tui.add_message(ChatMessage::agent(&content));
+                    } else {
+                        self.tui.add_message(ChatMessage::agent(rendered));
+                    }
                 }
                 SessionEvent::ToolCall { name, args, .. } => {
                     self.tui.add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
@@ -1160,7 +1294,11 @@ fn process_orchestrator_event(
     match event {
         OrchestratorEvent::Token(t) => {
             app.tui.is_thinking = true;
-            app.tui.append_agent_token(&t);
+            app.streaming_assistant_raw.push_str(&t);
+            let rendered = sanitize_assistant_text(&app.streaming_assistant_raw);
+            if !rendered.trim().is_empty() {
+                set_agent_transcript_message(&mut app.tui, &rendered);
+            }
         }
         OrchestratorEvent::ToolCall { name, args } => {
             app.tui.current_tool = Some(name.clone());
@@ -1226,18 +1364,27 @@ fn process_orchestrator_event(
         OrchestratorEvent::Done(answer) => {
             app.tui.is_thinking = false;
             app.tui.current_tool = None;
+            let rendered = sanitize_assistant_text(&answer);
+            let answer_for_ui = if rendered.trim().is_empty() {
+                answer.clone()
+            } else {
+                rendered
+            };
             let has_streamed = matches!(
                 app.tui.messages.last(),
                 Some(last)
                     if matches!(last.kind, tui::MessageKind::Agent)
-                        && last.content == answer
+                        && last.content == answer_for_ui
             );
             if !has_streamed {
-                app.tui.add_message(ChatMessage::agent(&answer));
+                app.tui.add_message(ChatMessage::agent(&answer_for_ui));
             }
             app.tui.set_status("Done", false);
             app.event_rx = None;
-            let _ = app.session_store.append(&app.session_id, &SessionEvent::assistant(&answer));
+            let _ = app
+                .session_store
+                .append(&app.session_id, &SessionEvent::assistant(&answer_for_ui));
+            app.streaming_assistant_raw.clear();
             *refresh_metadata = true;
         }
         OrchestratorEvent::Error(err) => {
@@ -1247,6 +1394,7 @@ fn process_orchestrator_event(
             app.tui.set_status(format!("Error: {}", err), true);
             app.event_rx = None;
             let _ = app.session_store.append(&app.session_id, &SessionEvent::error(&err));
+            app.streaming_assistant_raw.clear();
             *refresh_metadata = true;
         }
     }
@@ -1409,11 +1557,11 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, mods: KeyModifiers) {
     }
 
     match (key, mods) {
-        // Shift+Enter → insert newline (multi-line input)
+        // Shift+Enter → insert newline
         (KeyCode::Enter, m) if m.contains(KeyModifiers::SHIFT) => {
+            app.tui.focus = Focus::Input;
             app.tui.input_insert('\n');
         }
-
         // Submit
         (KeyCode::Enter, _) => {
             if let Some(input) = app.tui.commit_input() {
@@ -1426,43 +1574,35 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, mods: KeyModifiers) {
             app.tui.focus = Focus::Input;
             app.tui.input_delete_word_back();
         }
-
-        // Ctrl+Left → move word left
+        // Ctrl+Left/Right → word navigation
         (KeyCode::Left, m) if m.contains(KeyModifiers::CONTROL) => {
             app.tui.focus = Focus::Input;
             app.tui.input_move_word_left();
         }
-
-        // Ctrl+Right → move word right
         (KeyCode::Right, m) if m.contains(KeyModifiers::CONTROL) => {
             app.tui.focus = Focus::Input;
             app.tui.input_move_word_right();
         }
-
         // Ctrl+U → clear line
         (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
             app.tui.focus = Focus::Input;
             app.tui.input_clear_line();
         }
-
-        // Ctrl+K → kill to end of line
+        // Ctrl+K → kill to end
         (KeyCode::Char('k'), m) if m.contains(KeyModifiers::CONTROL) => {
             app.tui.focus = Focus::Input;
             app.tui.input_kill_to_end();
         }
-
-        // Ctrl+A → move to beginning
+        // Ctrl+A → home
         (KeyCode::Char('a'), m) if m.contains(KeyModifiers::CONTROL) => {
             app.tui.focus = Focus::Input;
             app.tui.input_home();
         }
-
-        // Ctrl+E → move to end
+        // Ctrl+E → end
         (KeyCode::Char('e'), m) if m.contains(KeyModifiers::CONTROL) => {
             app.tui.focus = Focus::Input;
             app.tui.input_end();
         }
-
         // Delete key → forward delete
         (KeyCode::Delete, _) => {
             app.tui.focus = Focus::Input;
@@ -1496,14 +1636,8 @@ fn handle_chat_keys(app: &mut App, key: KeyCode, mods: KeyModifiers) {
                     refresh_tui_previews(app);
                 }
             }
-            Focus::ToolLog => {
-                app.tui.tool_follow = false;
-                app.tui.tool_scroll = 0;
-            }
-            Focus::Chat => {
-                app.tui.chat_follow = false;
-                app.tui.chat_scroll = 0;
-            }
+            Focus::ToolLog => { app.tui.tool_follow = false; app.tui.tool_scroll = 0; }
+            Focus::Chat => { app.tui.chat_follow = false; app.tui.chat_scroll = 0; }
         },
         (KeyCode::End, _) => match app.tui.focus {
             Focus::Input => app.tui.input_end(),
@@ -1604,7 +1738,12 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
                                 app.tui.add_message(ChatMessage::user(&content));
                             }
                             SessionEvent::AssistantMessage { content, .. } => {
-                                app.tui.append_agent_token(&content);
+                                let rendered = sanitize_assistant_text(&content);
+                                if rendered.trim().is_empty() {
+                                    app.tui.add_message(ChatMessage::agent(&content));
+                                } else {
+                                    app.tui.add_message(ChatMessage::agent(rendered));
+                                }
                             }
                             SessionEvent::ToolCall { name, args, .. } => {
                                 app.tui.add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
@@ -1711,6 +1850,7 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
 fn submit_input(app: &mut App, input: &str) {
     app.tui.follow_chat();
     app.tui.add_message(ChatMessage::user(input));
+    app.streaming_assistant_raw.clear();
     let _ = app.session_store.append(&app.session_id, &SessionEvent::user(input));
     refresh_tui_metadata(app);
 
@@ -1738,20 +1878,16 @@ fn submit_input(app: &mut App, input: &str) {
         app.tui.messages.clear();
         app.tui.tool_log.clear();
         app.orchestrator.conversation.clear();
+        app.streaming_assistant_raw.clear();
         app.tui.add_message(ChatMessage::system("Session cleared."));
     } else if input == "/help" {
         app.tui.add_message(ChatMessage::system(HELP_TEXT));
     } else if input == "/status" {
         let status = format!(
-            "Model: {}\nTokens: {}/{} ({:.0}%)\nSession: {}\nMessages: {}\nTool log entries: {}",
+            "Model: {}\nTokens: {}/{} ({:.0}%)\nSession: {}\nMessages: {}\nTool log: {} entries",
             app.config.ollama_model,
-            app.tui.token_count,
-            app.tui.token_limit,
-            if app.tui.token_limit > 0 {
-                app.tui.token_count as f64 / app.tui.token_limit as f64 * 100.0
-            } else {
-                0.0
-            },
+            app.tui.token_count, app.tui.token_limit,
+            if app.tui.token_limit > 0 { app.tui.token_count as f64 / app.tui.token_limit as f64 * 100.0 } else { 0.0 },
             app.session_id,
             app.tui.messages.len(),
             app.tui.tool_log.len(),
@@ -1759,8 +1895,7 @@ fn submit_input(app: &mut App, input: &str) {
         app.tui.add_message(ChatMessage::system(status));
     } else if input == "/doctor" {
         app.tui.add_message(ChatMessage::system(format!(
-            "Checking Ollama at {}...",
-            app.config.ollama_base_url
+            "Checking Ollama at {}...", app.config.ollama_base_url
         )));
     } else if input.starts_with("/goal ") {
         let goal_text = input["/goal ".len()..].to_string();
@@ -1915,8 +2050,8 @@ async fn start_health_server() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pending_action, build_permission_preview, summarize_tool_call, truncate_multiline,
-        PERMISSION_PREVIEW_MAX_LINES,
+        build_pending_action, build_permission_preview, sanitize_assistant_text,
+        summarize_tool_call, truncate_multiline, PERMISSION_PREVIEW_MAX_LINES,
     };
     use crate::tui::ActionKind;
     use serde_json::json;
@@ -1999,5 +2134,31 @@ mod tests {
         assert!(truncated.contains("entry 0"));
         assert!(truncated.contains("… truncated"));
         assert!(!truncated.contains("entry 19"));
+    }
+
+    #[test]
+    fn sanitize_assistant_text_extracts_final_answer_from_json_wrapper() {
+        let rendered = sanitize_assistant_text(
+            r#"{"reasoning":"Need to inspect the project first.","tool_calls":[],"final_answer":"I found the failing test and fixed the parser."}"#,
+        );
+
+        assert_eq!(rendered, "I found the failing test and fixed the parser.");
+    }
+
+    #[test]
+    fn sanitize_assistant_text_extracts_partial_streamed_final_answer() {
+        let rendered = sanitize_assistant_text(
+            r#"{"reasoning":"Inspecting files","final_answer":"I fixed the conversation renderer"#,
+        );
+
+        assert_eq!(rendered, "I fixed the conversation renderer");
+    }
+
+    #[test]
+    fn sanitize_assistant_text_leaves_plain_text_unchanged() {
+        let rendered =
+            sanitize_assistant_text("I updated the TUI to use a right-side operations rail.");
+
+        assert_eq!(rendered, "I updated the TUI to use a right-side operations rail.");
     }
 }

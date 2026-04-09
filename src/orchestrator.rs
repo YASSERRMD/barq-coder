@@ -123,11 +123,12 @@ impl Orchestrator {
             3. Use tools in this order: barq_search -> edit_file -> cargo_check.\n\
             4. NEVER apply edits without running cargo_check afterward (if a rust project).\n\
             5. If cargo_check fails, fix errors before giving a final answer.\n\
-            6. When you need to use a tool, respond with tool_calls in the message.\n\
+            6. When you need to use a tool, call it through the model's native tool-calling interface. DO NOT print JSON wrappers, tool call objects, or schema-shaped payloads in assistant text.\n\
+            7. Respond to the user in normal plain language. NEVER answer with a JSON envelope unless the user explicitly asks for JSON.\n\
             \n\
             {}\n\
             \n\
-            Respond exactly with a JSON block. Use tools when needed.",
+            Respond in plain language. Use tools when needed.",
             memory_str, tool_desc, context_str, deps_str, symbolic_ctx
         )
     }
