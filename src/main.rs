@@ -47,6 +47,10 @@ use barq::BarqIndex;
 use cli::{Cli, Commands};
 use clap::Parser;
 use config::Config;
+use control_plane::{
+    ControlPlaneCommand, ControlPlaneResponse, NormalizedMessage, NormalizedMessageKind,
+    PermissionDecision as ControlPlanePermissionDecision, TranscriptControlBridge,
+};
 use cost_tracker::CostTracker;
 use orchestrator::{Orchestrator, OrchestratorEvent};
 use session::{SessionEvent, SessionStore};
@@ -65,6 +69,7 @@ struct App {
     event_rx: Option<mpsc::Receiver<OrchestratorEvent>>,
     session_store: SessionStore,
     session_id: String,
+    transcript_control: TranscriptControlBridge,
     pending_permission_requests: std::collections::VecDeque<PendingPermissionRequest>,
     pending_budget_request: Option<tokio::sync::oneshot::Sender<bool>>,
     cost: CostTracker,
@@ -83,6 +88,116 @@ enum PermissionDecision {
     AllowOnce,
     AllowRemembered,
     Deny,
+}
+
+fn normalized_to_chat_message(message: NormalizedMessage) -> ChatMessage {
+    let kind = match message.kind {
+        NormalizedMessageKind::User => tui::MessageKind::User,
+        NormalizedMessageKind::Agent => tui::MessageKind::Agent,
+        NormalizedMessageKind::ToolCall => tui::MessageKind::ToolCall,
+        NormalizedMessageKind::ToolResult => tui::MessageKind::ToolResult,
+        NormalizedMessageKind::System => tui::MessageKind::System,
+        NormalizedMessageKind::Error => tui::MessageKind::Error,
+        NormalizedMessageKind::Permission => tui::MessageKind::Permission,
+    };
+
+    ChatMessage::new(kind, message.title, message.content, message.status)
+}
+
+fn apply_control_plane_response(tui: &mut TuiState, response: ControlPlaneResponse) {
+    match response {
+        ControlPlaneResponse::Noop => {}
+        ControlPlaneResponse::Append {
+            message,
+            tool_log_entry,
+        } => {
+            tui.add_message(normalized_to_chat_message(message));
+            if let Some(entry) = tool_log_entry.filter(|entry| !entry.trim().is_empty()) {
+                tui.add_tool_log_entry(entry);
+                tui.tool_scroll = usize::MAX;
+            }
+        }
+        ControlPlaneResponse::ReplaceLast {
+            message,
+            tool_log_entry,
+        } => {
+            tui.replace_last_message(normalized_to_chat_message(message));
+            if let Some(entry) = tool_log_entry.filter(|entry| !entry.trim().is_empty()) {
+                tui.add_tool_log_entry(entry);
+                tui.tool_scroll = usize::MAX;
+            }
+        }
+    }
+}
+
+fn dispatch_control_plane(app: &mut App, command: ControlPlaneCommand) {
+    match app.transcript_control.send(command) {
+        Ok(response) => apply_control_plane_response(&mut app.tui, response),
+        Err(err) => app
+            .tui
+            .add_message(ChatMessage::error(format!("Transcript control plane failed: {}", err))),
+    }
+}
+
+fn replay_session_event(app: &mut App, ev: SessionEvent) {
+    match ev {
+        SessionEvent::UserInput { content, .. } => {
+            dispatch_control_plane(app, ControlPlaneCommand::UserMessage { content });
+        }
+        SessionEvent::AssistantMessage { content, .. } => {
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::AssistantDone {
+                    content: Some(content),
+                },
+            );
+        }
+        SessionEvent::ToolCall { name, args, .. } => {
+            dispatch_control_plane(app, ControlPlaneCommand::ToolCall { name, args });
+        }
+        SessionEvent::ToolResult { name, result, .. } => {
+            dispatch_control_plane(app, ControlPlaneCommand::ToolResult { name, result });
+        }
+        SessionEvent::EditApplied { file, patch, .. } => {
+            app.tui.update_diff(format!("Latest Diff • {}", file), &patch);
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::SystemMessage {
+                    content: format!("Edit applied to {}", file),
+                },
+            );
+        }
+        SessionEvent::Error { message, .. } => {
+            dispatch_control_plane(app, ControlPlaneCommand::ErrorMessage { content: message });
+        }
+        SessionEvent::System { content, .. } => {
+            dispatch_control_plane(app, ControlPlaneCommand::SystemMessage { content });
+        }
+        SessionEvent::Verification {
+            step_id,
+            approved,
+            ..
+        } => {
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::SystemMessage {
+                    content: format!(
+                        "Verification {} for {}",
+                        if approved { "approved" } else { "recorded" },
+                        step_id
+                    ),
+                },
+            );
+        }
+        SessionEvent::CompactBoundary { summary, .. } => {
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::SystemMessage {
+                    content: format!("Compaction boundary: {}", summary),
+                },
+            );
+        }
+    }
 }
 
 const TOOL_CALL_SUMMARY_MAX_LINES: usize = 8;
@@ -758,12 +873,6 @@ fn show_permission_prompt(app: &mut App) {
             hint: hint.clone(),
             queue_len: app.pending_permission_requests.len(),
         });
-        app.tui.add_message(ChatMessage::system(format!(
-            ">> PERMISSION REQUIRED: '{}' <<\nReason: {}\nReview in Sandbox and use {}. [Esc] denies all.",
-            next.name,
-            next.reason,
-            hint
-        )));
         app.tui.set_status(
             format!("Pending approval: '{}' [{} queued]", next.name, app.pending_permission_requests.len()),
             false,
@@ -779,6 +888,14 @@ fn queue_permission_request(
     tx: tokio::sync::oneshot::Sender<bool>,
 ) {
     let action = build_pending_action(&name, &args, &reason);
+    dispatch_control_plane(
+        app,
+        ControlPlaneCommand::PermissionRequest {
+            name: name.clone(),
+            args: args.clone(),
+            reason: reason.clone(),
+        },
+    );
     app.pending_permission_requests.push_back(PendingPermissionRequest {
         name,
         args,
@@ -804,6 +921,18 @@ fn resolve_permission_request(app: &mut App, index: usize, decision: PermissionD
         let approval = matches!(
             decision,
             PermissionDecision::AllowOnce | PermissionDecision::AllowRemembered
+        );
+        let control_plane_decision = if approval {
+            ControlPlanePermissionDecision::Approved
+        } else {
+            ControlPlanePermissionDecision::Denied
+        };
+        dispatch_control_plane(
+            app,
+            ControlPlaneCommand::PermissionResolved {
+                name: request.name.clone(),
+                decision: control_plane_decision,
+            },
         );
 
         match decision {
@@ -862,7 +991,7 @@ fn deny_all_permission_requests(app: &mut App) {
 }
 
 impl App {
-    fn new(resume_id: Option<String>, cli: &Cli) -> Self {
+    fn new(resume_id: Option<String>, cli: &Cli) -> anyhow::Result<Self> {
         let mut config = Config::load();
         // Apply CLI overrides
         if let Some(m) = &cli.model { config.ollama_model = m.clone(); }
@@ -918,6 +1047,7 @@ impl App {
 
         let token_limit = config.token_limit;
         let model = config.ollama_model.clone();
+        let transcript_control = TranscriptControlBridge::new(&config.workspace_root)?;
 
         let mut tui = TuiState::new(token_limit, model, session_id.clone());
         tui.workspace_files = workspace_files;
@@ -931,6 +1061,7 @@ impl App {
             event_rx: None,
             session_store,
             session_id,
+            transcript_control,
             pending_permission_requests: std::collections::VecDeque::new(),
             pending_budget_request: None,
             cost: CostTracker::new(),
@@ -938,44 +1069,16 @@ impl App {
             streaming_assistant_raw: String::new(),
         };
         refresh_tui_metadata(&mut app);
-        app
+        Ok(app)
     }
 
     /// Load past session events into the UI
     fn load_session(&mut self) {
+        let _ = self.transcript_control.send(ControlPlaneCommand::Reset);
+        self.tui.messages.clear();
+        self.tui.tool_log.clear();
         for ev in self.session_store.replay(&self.session_id) {
-            match ev {
-                SessionEvent::UserInput { content, .. } => {
-                    self.tui.add_message(ChatMessage::user(&content));
-                }
-                SessionEvent::AssistantMessage { content, .. } => {
-                    let rendered = sanitize_assistant_text(&content);
-                    if rendered.trim().is_empty() {
-                        self.tui.add_message(ChatMessage::agent(&content));
-                    } else {
-                        self.tui.add_message(ChatMessage::agent(rendered));
-                    }
-                }
-                SessionEvent::ToolCall { name, args, .. } => {
-                    self.tui.add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
-                }
-                SessionEvent::ToolResult { name, result, .. } => {
-                    let entry = summarize_tool_result(&name, &result);
-                    self.tui.tool_log.push(entry.clone());
-                    self.tui.add_message(ChatMessage::tool_result(entry));
-                }
-                SessionEvent::EditApplied { file, patch, .. } => {
-                    self.tui.update_diff(format!("Latest Diff • {}", file), &patch);
-                    self.tui.add_message(ChatMessage::system(format!(
-                        "Edit applied to {}",
-                        file
-                    )));
-                }
-                SessionEvent::Error { message, .. } => {
-                    self.tui.add_message(ChatMessage::error(&message));
-                }
-                _ => {}
-            }
+            replay_session_event(self, ev);
         }
     }
 }
@@ -1057,6 +1160,11 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(start_health_server());
 
+    let mut app = App::new(resume_id.clone(), &cli)?;
+    if resume_id.is_some() {
+        app.load_session();
+    }
+
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1068,11 +1176,6 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
-    let mut app = App::new(resume_id.clone(), &cli);
-    if resume_id.is_some() {
-        app.load_session();
-    }
     
     let res = run_app(&mut terminal, &mut app).await;
 
@@ -1296,18 +1399,20 @@ fn process_orchestrator_event(
         OrchestratorEvent::Token(t) => {
             app.tui.is_thinking = true;
             app.streaming_assistant_raw.push_str(&t);
-            let rendered = sanitize_assistant_text(&app.streaming_assistant_raw);
-            if !rendered.trim().is_empty() {
-                set_agent_transcript_message(&mut app.tui, &rendered);
-            }
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::AssistantToken { token: t },
+            );
         }
         OrchestratorEvent::ToolCall { name, args } => {
             app.tui.current_tool = Some(name.clone());
-            let entry = summarize_tool_call(&name, &args);
-            let log_entry = entry.lines().next().unwrap_or(&entry).to_string();
-            app.tui.tool_log.push(log_entry);
-            app.tui.tool_scroll = usize::MAX;
-            app.tui.add_message(ChatMessage::tool_call(&entry));
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::ToolCall {
+                    name: name.clone(),
+                    args: args.clone(),
+                },
+            );
             let _ = app.session_store.append(
                 &app.session_id,
                 &SessionEvent::tool_call(&name, args.clone()),
@@ -1315,10 +1420,13 @@ fn process_orchestrator_event(
         }
         OrchestratorEvent::ToolResult { name, result } => {
             app.tui.current_tool = None;
-            let entry = summarize_tool_result(&name, &result);
-            app.tui.tool_log.push(entry.clone());
-            app.tui.tool_scroll = usize::MAX;
-            app.tui.add_message(ChatMessage::tool_result(&entry));
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::ToolResult {
+                    name: name.clone(),
+                    result: result.clone(),
+                },
+            );
             let _ = app.session_store.append(
                 &app.session_id,
                 &SessionEvent::tool_result(&name, result.clone()),
@@ -1365,33 +1473,29 @@ fn process_orchestrator_event(
         OrchestratorEvent::Done(answer) => {
             app.tui.is_thinking = false;
             app.tui.current_tool = None;
-            let rendered = sanitize_assistant_text(&answer);
-            let answer_for_ui = if rendered.trim().is_empty() {
-                answer.clone()
-            } else {
-                rendered
-            };
-            let has_streamed = matches!(
-                app.tui.messages.last(),
-                Some(last)
-                    if matches!(last.kind, tui::MessageKind::Agent)
-                        && last.content == answer_for_ui
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::AssistantDone {
+                    content: Some(answer.clone()),
+                },
             );
-            if !has_streamed {
-                app.tui.add_message(ChatMessage::agent(&answer_for_ui));
-            }
             app.tui.set_status("Done", false);
             app.event_rx = None;
             let _ = app
                 .session_store
-                .append(&app.session_id, &SessionEvent::assistant(&answer_for_ui));
+                .append(&app.session_id, &SessionEvent::assistant(&answer));
             app.streaming_assistant_raw.clear();
             *refresh_metadata = true;
         }
         OrchestratorEvent::Error(err) => {
             app.tui.is_thinking = false;
             app.tui.current_tool = None;
-            app.tui.add_message(ChatMessage::error(&err));
+            dispatch_control_plane(
+                app,
+                ControlPlaneCommand::ErrorMessage {
+                    content: err.clone(),
+                },
+            );
             app.tui.set_status(format!("Error: {}", err), true);
             app.event_rx = None;
             let _ = app.session_store.append(&app.session_id, &SessionEvent::error(&err));
@@ -1729,43 +1833,17 @@ fn handle_sessions_keys(app: &mut App, key: KeyCode) {
             if let Some(idx) = app.tui.session_list_state.selected() {
                 if let Some(s) = app.tui.sessions.get(idx) {
                     let sid = s.id.clone();
-                    app.tui.add_message(ChatMessage::system(format!(
-                        "Replaying session: {}",
-                        sid
-                    )));
+                    let _ = app.transcript_control.send(ControlPlaneCommand::Reset);
+                    app.tui.messages.clear();
+                    app.tui.tool_log.clear();
+                    dispatch_control_plane(
+                        app,
+                        ControlPlaneCommand::SystemMessage {
+                            content: format!("Replaying session: {}", sid),
+                        },
+                    );
                     for ev in app.session_store.replay(&sid) {
-                        match ev {
-                            SessionEvent::UserInput { content, .. } => {
-                                app.tui.add_message(ChatMessage::user(&content));
-                            }
-                            SessionEvent::AssistantMessage { content, .. } => {
-                                let rendered = sanitize_assistant_text(&content);
-                                if rendered.trim().is_empty() {
-                                    app.tui.add_message(ChatMessage::agent(&content));
-                                } else {
-                                    app.tui.add_message(ChatMessage::agent(rendered));
-                                }
-                            }
-                            SessionEvent::ToolCall { name, args, .. } => {
-                                app.tui.add_message(ChatMessage::tool_call(summarize_tool_call(&name, &args)));
-                            }
-                            SessionEvent::ToolResult { name, result, .. } => {
-                                let entry = summarize_tool_result(&name, &result);
-                                app.tui.tool_log.push(entry.clone());
-                                app.tui.add_message(ChatMessage::tool_result(entry));
-                            }
-                            SessionEvent::EditApplied { file, patch, .. } => {
-                                app.tui.update_diff(format!("Latest Diff • {}", file), &patch);
-                                app.tui.add_message(ChatMessage::system(format!(
-                                    "Edit applied to {}",
-                                    file
-                                )));
-                            }
-                            SessionEvent::Error { message, .. } => {
-                                app.tui.add_message(ChatMessage::error(&message));
-                            }
-                            _ => {}
-                        }
+                        replay_session_event(app, ev);
                     }
                     app.tui.active_tab = ActiveTab::Chat;
                 }
@@ -1850,7 +1928,12 @@ fn handle_mouse(app: &mut App, m: crossterm::event::MouseEvent) {
 // ─────────────────────────────────────────────────────────────────────────────
 fn submit_input(app: &mut App, input: &str) {
     app.tui.follow_chat();
-    app.tui.add_message(ChatMessage::user(input));
+    dispatch_control_plane(
+        app,
+        ControlPlaneCommand::UserMessage {
+            content: input.to_string(),
+        },
+    );
     app.streaming_assistant_raw.clear();
     let _ = app.session_store.append(&app.session_id, &SessionEvent::user(input));
     refresh_tui_metadata(app);
@@ -1880,6 +1963,7 @@ fn submit_input(app: &mut App, input: &str) {
         app.tui.tool_log.clear();
         app.orchestrator.conversation.clear();
         app.streaming_assistant_raw.clear();
+        let _ = app.transcript_control.send(ControlPlaneCommand::Reset);
         app.tui.add_message(ChatMessage::system("Session cleared."));
     } else if input == "/help" {
         app.tui.add_message(ChatMessage::system(HELP_TEXT));
@@ -2051,10 +2135,12 @@ async fn start_health_server() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pending_action, build_permission_preview, sanitize_assistant_text,
-        summarize_tool_call, truncate_multiline, PERMISSION_PREVIEW_MAX_LINES,
+        apply_control_plane_response, build_pending_action, build_permission_preview,
+        normalized_to_chat_message, sanitize_assistant_text, summarize_tool_call,
+        truncate_multiline, PERMISSION_PREVIEW_MAX_LINES,
     };
-    use crate::tui::ActionKind;
+    use crate::control_plane::{ControlPlaneResponse, NormalizedMessage, NormalizedMessageKind};
+    use crate::tui::{ActionKind, TuiState};
     use serde_json::json;
 
     #[test]
@@ -2161,5 +2247,54 @@ mod tests {
             sanitize_assistant_text("I updated the TUI to use a right-side operations rail.");
 
         assert_eq!(rendered, "I updated the TUI to use a right-side operations rail.");
+    }
+
+    #[test]
+    fn normalized_messages_map_to_titled_chat_cards() {
+        let message = normalized_to_chat_message(NormalizedMessage {
+            kind: NormalizedMessageKind::ToolCall,
+            title: "Read File".to_string(),
+            content: "Read src/main.rs".to_string(),
+            status: Some("pending".to_string()),
+        });
+
+        assert_eq!(message.title, "Read File");
+        assert_eq!(message.content, "Read src/main.rs");
+        assert_eq!(message.status.as_deref(), Some("pending"));
+    }
+
+    #[test]
+    fn control_plane_replace_updates_last_transcript_message() {
+        let mut tui = TuiState::new(4096, "test-model".to_string(), "session".to_string());
+        tui.messages.clear();
+
+        apply_control_plane_response(
+            &mut tui,
+            ControlPlaneResponse::Append {
+                message: NormalizedMessage {
+                    kind: NormalizedMessageKind::Agent,
+                    title: "Response".to_string(),
+                    content: "Draft".to_string(),
+                    status: Some("streaming".to_string()),
+                },
+                tool_log_entry: None,
+            },
+        );
+        apply_control_plane_response(
+            &mut tui,
+            ControlPlaneResponse::ReplaceLast {
+                message: NormalizedMessage {
+                    kind: NormalizedMessageKind::Agent,
+                    title: "Response".to_string(),
+                    content: "Draft complete".to_string(),
+                    status: Some("final".to_string()),
+                },
+                tool_log_entry: None,
+            },
+        );
+
+        assert_eq!(tui.messages.len(), 1);
+        assert_eq!(tui.messages[0].content, "Draft complete");
+        assert_eq!(tui.messages[0].status.as_deref(), Some("final"));
     }
 }
