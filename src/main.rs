@@ -22,6 +22,7 @@ mod cli;
 mod collab;
 mod commands;
 mod config;
+mod control_plane;
 mod context;
 mod cost_tracker;
 mod daemon;
