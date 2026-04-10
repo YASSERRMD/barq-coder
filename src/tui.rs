@@ -103,7 +103,7 @@ pub enum Focus {
 // ─────────────────────────────────────────────
 // Chat message types
 // ─────────────────────────────────────────────
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MessageKind {
     User,
     Agent,
@@ -111,32 +111,52 @@ pub enum MessageKind {
     ToolResult,
     System,
     Error,
+    Permission,
 }
 
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub kind: MessageKind,
+    pub title: String,
     pub content: String,
+    pub status: Option<String>,
 }
 
 impl ChatMessage {
+    pub fn new(
+        kind: MessageKind,
+        title: impl Into<String>,
+        content: impl Into<String>,
+        status: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            title: title.into(),
+            content: content.into(),
+            status,
+        }
+    }
+
     pub fn user(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::User, content: s.into() }
+        Self::new(MessageKind::User, "Request", s, None)
     }
     pub fn agent(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::Agent, content: s.into() }
+        Self::new(MessageKind::Agent, "Response", s, None)
     }
     pub fn tool_call(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::ToolCall, content: s.into() }
+        Self::new(MessageKind::ToolCall, "Tool Call", s, None)
     }
     pub fn tool_result(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::ToolResult, content: s.into() }
+        Self::new(MessageKind::ToolResult, "Tool Result", s, None)
     }
     pub fn system(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::System, content: s.into() }
+        Self::new(MessageKind::System, "Status", s, None)
     }
     pub fn error(s: impl Into<String>) -> Self {
-        Self { kind: MessageKind::Error, content: s.into() }
+        Self::new(MessageKind::Error, "Error", s, None)
+    }
+    pub fn permission(title: impl Into<String>, s: impl Into<String>, status: Option<String>) -> Self {
+        Self::new(MessageKind::Permission, title, s, status)
     }
 }
 
@@ -340,6 +360,18 @@ impl TuiState {
     pub fn add_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
         // auto-scroll to bottom
+        if self.chat_follow {
+            self.chat_scroll = usize::MAX;
+        }
+    }
+
+    pub fn replace_last_message(&mut self, msg: ChatMessage) {
+        if let Some(last) = self.messages.last_mut() {
+            *last = msg;
+        } else {
+            self.messages.push(msg);
+        }
+
         if self.chat_follow {
             self.chat_scroll = usize::MAX;
         }
@@ -1632,56 +1664,25 @@ fn build_transcript_lines(messages: &[ChatMessage], width: usize) -> Vec<Line<'s
     let mut lines = Vec::new();
 
     for message in messages {
-        match message.kind {
-            MessageKind::User => push_message_card(
-                &mut lines,
-                "REQUEST",
-                Palette::USER_MSG,
-                &message.content,
-                &message.kind,
-                width,
-            ),
-            MessageKind::Agent => push_message_card(
-                &mut lines,
-                "ASSISTANT",
-                Palette::AGENT_MSG,
-                &message.content,
-                &message.kind,
-                width,
-            ),
-            MessageKind::ToolCall => push_message_card(
-                &mut lines,
-                "TOOL",
-                Palette::TOOL_CALL,
-                &message.content,
-                &message.kind,
-                width,
-            ),
-            MessageKind::ToolResult => push_message_card(
-                &mut lines,
-                "RESULT",
-                Palette::TOOL_RESULT,
-                &message.content,
-                &message.kind,
-                width,
-            ),
-            MessageKind::System => push_message_card(
-                &mut lines,
-                "STATUS",
-                Palette::ACCENT2,
-                &message.content,
-                &message.kind,
-                width,
-            ),
-            MessageKind::Error => push_message_card(
-                &mut lines,
-                "ERROR",
-                Palette::ERROR_MSG,
-                &message.content,
-                &message.kind,
-                width,
-            ),
-        }
+        let accent = match message.kind {
+            MessageKind::User => Palette::USER_MSG,
+            MessageKind::Agent => Palette::AGENT_MSG,
+            MessageKind::ToolCall => Palette::TOOL_CALL,
+            MessageKind::ToolResult => Palette::TOOL_RESULT,
+            MessageKind::System => Palette::ACCENT2,
+            MessageKind::Error => Palette::ERROR_MSG,
+            MessageKind::Permission => Palette::WARN_MSG,
+        };
+
+        push_message_card(
+            &mut lines,
+            &message.title,
+            accent,
+            &message.content,
+            &message.kind,
+            message.status.as_deref(),
+            width,
+        );
     }
 
     if lines.is_empty() {
@@ -1700,17 +1701,56 @@ fn push_message_card(
     accent: Color,
     body: &str,
     kind: &MessageKind,
+    status: Option<&str>,
     width: usize,
 ) {
-    let rule_width = width.saturating_sub(label.len() + 6).max(4);
-    lines.push(Line::from(vec![
+    let status_label = status
+        .map(|value| match value {
+            "streaming" => "Live",
+            "pending" => "Pending",
+            "approved" => "Approved",
+            "denied" => "Denied",
+            "final" => "Final",
+            other => other,
+        })
+        .unwrap_or("");
+    let status_len = if status_label.is_empty() {
+        0
+    } else {
+        status_label.len() + 4
+    };
+    let rule_width = width
+        .saturating_sub(label.len() + status_len + 6)
+        .max(4);
+
+    let mut header = vec![
         Span::styled(
-            format!(" {} ", label),
+            format!(" {} ", trim_inline(label, width.saturating_sub(8).max(8))),
             Style::default().fg(Palette::BG).bg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled("─".repeat(rule_width), Style::default().fg(Palette::BORDER)),
-    ]));
+    ];
+
+    if !status_label.is_empty() {
+        let badge_style = match status_label {
+            "Denied" => Style::default().fg(Palette::BG).bg(Palette::ERROR_MSG),
+            "Approved" => Style::default().fg(Palette::BG).bg(Palette::STATUS_OK),
+            "Pending" => Style::default().fg(Palette::BG).bg(Palette::STATUS_WARN),
+            "Live" => Style::default().fg(Palette::BG).bg(Palette::ACCENT2),
+            _ => Style::default().fg(Palette::BG).bg(Palette::BORDER),
+        }
+        .add_modifier(Modifier::BOLD);
+
+        header.push(Span::styled(format!(" {} ", status_label), badge_style));
+        header.push(Span::raw(" "));
+    }
+
+    header.push(Span::styled(
+        "─".repeat(rule_width),
+        Style::default().fg(Palette::BORDER),
+    ));
+
+    lines.push(Line::from(header));
 
     match kind {
         MessageKind::Agent => {
@@ -1732,6 +1772,7 @@ fn push_message_card(
                     Style::default().fg(Palette::TEXT_DIM).add_modifier(Modifier::ITALIC)
                 }
                 MessageKind::Error => Style::default().fg(Palette::ERROR_MSG),
+                MessageKind::Permission => Style::default().fg(Palette::WARN_MSG),
                 MessageKind::Agent => Style::default().fg(Palette::TEXT),
             };
 
