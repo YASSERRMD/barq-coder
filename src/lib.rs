@@ -2,6 +2,7 @@ pub mod agent;
 pub mod agents;
 pub mod barq;
 pub mod config;
+pub mod control_plane;
 pub mod context;
 pub mod collab;
 pub mod cost_tracker;
