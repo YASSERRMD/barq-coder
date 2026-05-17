@@ -52,11 +52,18 @@ impl PermissionManager {
             .unwrap_or_else(|_| PathBuf::from(workspace_root));
         let mut blocked = HashSet::new();
 
+        // Unix / Linux core system paths
         blocked.insert(PathBuf::from("/etc"));
         blocked.insert(PathBuf::from("/bin"));
         blocked.insert(PathBuf::from("/usr/bin"));
         blocked.insert(PathBuf::from("/usr/sbin"));
         blocked.insert(PathBuf::from("/var/run"));
+
+        // macOS-specific system paths
+        blocked.insert(PathBuf::from("/System"));
+        blocked.insert(PathBuf::from("/Library"));
+        blocked.insert(PathBuf::from("/private/etc"));
+        blocked.insert(PathBuf::from("/private/var"));
 
         let blocked_patterns = vec![
             "rm -rf /".to_string(),
@@ -84,23 +91,23 @@ impl PermissionManager {
     }
 
     pub fn auto_allow_tool(&self, tool_name: &str) {
-        let mut tools = self.auto_allowed_tools.write().expect("permission lock poisoned");
-        tools.insert(tool_name.to_string());
+        if let Ok(mut tools) = self.auto_allowed_tools.write() {
+            tools.insert(tool_name.to_string());
+        }
     }
 
     pub fn allow_directory(&self, dir: &str) {
         if let Ok(p) = Path::new(dir).canonicalize() {
-            let mut dirs = self.allowed_dirs.write().expect("permission lock poisoned");
-            dirs.insert(p);
+            if let Ok(mut dirs) = self.allowed_dirs.write() {
+                dirs.insert(p);
+            }
         }
     }
 
     pub fn allow_edits_for_session(&self) {
-        let mut accept = self
-            .accept_edits_for_session
-            .write()
-            .expect("permission lock poisoned");
-        *accept = true;
+        if let Ok(mut accept) = self.accept_edits_for_session.write() {
+            *accept = true;
+        }
     }
 
     pub fn remember_shell_command(&self, command: &str) -> anyhow::Result<()> {
@@ -108,7 +115,7 @@ impl PermissionManager {
             let mut commands = self
                 .allowed_bash_commands
                 .write()
-                .expect("permission lock poisoned");
+                .map_err(|_| anyhow::anyhow!("permission lock poisoned"))?;
             commands.insert(command.to_string());
         }
         self.persist_allow_rule(&format!("Bash({})", command))
@@ -120,7 +127,7 @@ impl PermissionManager {
             let mut commands = self
                 .allowed_git_commands
                 .write()
-                .expect("permission lock poisoned");
+                .map_err(|_| anyhow::anyhow!("permission lock poisoned"))?;
             commands.insert(command.clone());
         }
         self.persist_allow_rule(&format!("Git({})", command))
@@ -151,10 +158,11 @@ impl PermissionManager {
             return PermissionResult::Allow;
         }
 
-        let dirs = self.allowed_dirs.read().expect("permission lock poisoned");
-        for allowed in dirs.iter() {
-            if canonical.starts_with(allowed) {
-                return PermissionResult::Allow;
+        if let Ok(dirs) = self.allowed_dirs.read() {
+            for allowed in dirs.iter() {
+                if canonical.starts_with(allowed) {
+                    return PermissionResult::Allow;
+                }
             }
         }
 
@@ -182,12 +190,10 @@ impl PermissionManager {
                     }
                 }
 
-                let commands = self
-                    .allowed_bash_commands
-                    .read()
-                    .expect("permission lock poisoned");
-                if commands.contains(cmd) {
-                    return PermissionResult::Allow;
+                if let Ok(commands) = self.allowed_bash_commands.read() {
+                    if commands.contains(cmd) {
+                        return PermissionResult::Allow;
+                    }
                 }
             }
         }
@@ -196,22 +202,18 @@ impl PermissionManager {
             let operation = args.get("operation").and_then(|v| v.as_str()).unwrap_or("");
             let raw_args = args.get("args").and_then(|v| v.as_str()).unwrap_or("");
             let command = canonical_git_command(operation, raw_args);
-            let commands = self
-                .allowed_git_commands
-                .read()
-                .expect("permission lock poisoned");
-            if commands.contains(&command) {
-                return PermissionResult::Allow;
+            if let Ok(commands) = self.allowed_git_commands.read() {
+                if commands.contains(&command) {
+                    return PermissionResult::Allow;
+                }
             }
         }
 
         if matches!(tool_name, "edit_file" | "create_file") {
-            let accept = self
-                .accept_edits_for_session
-                .read()
-                .expect("permission lock poisoned");
-            if *accept {
-                return PermissionResult::Allow;
+            if let Ok(accept) = self.accept_edits_for_session.read() {
+                if *accept {
+                    return PermissionResult::Allow;
+                }
             }
         }
 
@@ -223,37 +225,28 @@ impl PermissionManager {
             return tool_specific_result;
         }
 
-        if self
-            .always_deny_tools
-            .read()
-            .expect("permission lock poisoned")
-            .contains(tool_name)
-        {
-            return PermissionResult::Deny(format!(
-                "Tool {} is blacklisted by always_deny_tools",
-                tool_name
-            ));
+        if let Ok(deny_tools) = self.always_deny_tools.read() {
+            if deny_tools.contains(tool_name) {
+                return PermissionResult::Deny(format!(
+                    "Tool {} is blacklisted by always_deny_tools",
+                    tool_name
+                ));
+            }
         }
 
-        if self
-            .always_ask_tools
-            .read()
-            .expect("permission lock poisoned")
-            .contains(tool_name)
-        {
-            return PermissionResult::Ask(format!(
-                "Tool {} is configured to always ask",
-                tool_name
-            ));
+        if let Ok(ask_tools) = self.always_ask_tools.read() {
+            if ask_tools.contains(tool_name) {
+                return PermissionResult::Ask(format!(
+                    "Tool {} is configured to always ask",
+                    tool_name
+                ));
+            }
         }
 
-        if self
-            .auto_allowed_tools
-            .read()
-            .expect("permission lock poisoned")
-            .contains(tool_name)
-        {
-            return PermissionResult::Allow;
+        if let Ok(allowed_tools) = self.auto_allowed_tools.read() {
+            if allowed_tools.contains(tool_name) {
+                return PermissionResult::Allow;
+            }
         }
 
         if risk == CommandRisk::Destructive {
