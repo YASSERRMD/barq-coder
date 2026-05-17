@@ -5,6 +5,104 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Shell command safety enforcement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Dangerous whole-command patterns (substring of the full command string).
+/// These are checked regardless of word boundaries because even embedding them
+/// in a pipeline is dangerous (e.g., `echo foo | rm -rf /`).
+const DANGEROUS_SUBSTRINGS: &[&str] = &[
+    "rm -rf /",
+    "> /dev/sda",
+    "dd if=",
+    "mkfs",
+    ":(){ :|:& };:", // fork bomb
+];
+
+/// Commands that are only blocked when they appear as a standalone word at the
+/// start of the command or after a pipe/semicolon/ampersand delimiter.
+/// Simple string-contains would block "scurl" or "myssh" incorrectly.
+const BLOCKED_COMMANDS: &[&str] = &[
+    "sudo",
+    "su",
+    "curl",
+    "wget",
+    "ssh",
+    "scp",
+    "nc",    // netcat
+    "ncat",
+    "socat",
+    "chmod",
+    "chown",
+    "chroot",
+];
+
+/// Returns the name of the first blocked pattern found in `cmd`, or `None`
+/// if the command is safe to run.
+fn blocked_shell_command(cmd: &str) -> Option<&'static str> {
+    // Check dangerous substrings first (no word-boundary needed)
+    for pattern in DANGEROUS_SUBSTRINGS {
+        if cmd.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+
+    // Check word-boundary blocked commands: split on shell delimiters and
+    // check the first token of each segment.
+    for segment in cmd.split(['|', ';', '&', '\n']) {
+        let token = segment.trim().split_whitespace().next().unwrap_or("");
+        // Strip any leading path prefix (e.g., /usr/bin/sudo → sudo)
+        let base = token.rsplit('/').next().unwrap_or(token);
+        for blocked in BLOCKED_COMMANDS {
+            if base == *blocked {
+                return Some(blocked);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blocked_shell_command;
+
+    #[test]
+    fn blocks_dangerous_substrings_regardless_of_position() {
+        assert!(blocked_shell_command("rm -rf /").is_some());
+        assert!(blocked_shell_command("echo foo && rm -rf / --no-preserve-root").is_some());
+        assert!(blocked_shell_command("dd if=/dev/zero of=/dev/sda").is_some());
+    }
+
+    #[test]
+    fn blocks_sudo_as_whole_word() {
+        assert!(blocked_shell_command("sudo apt install vim").is_some());
+        assert!(blocked_shell_command("cargo build && sudo make install").is_some());
+    }
+
+    #[test]
+    fn does_not_block_commands_containing_blocked_word_as_substring() {
+        // "scurl" or "my_curl_wrapper" should NOT be blocked
+        assert!(blocked_shell_command("scurl https://example.com").is_none());
+        assert!(blocked_shell_command("my_ssh_wrapper host").is_none());
+        assert!(blocked_shell_command("echo sudoer").is_none());
+    }
+
+    #[test]
+    fn allows_safe_cargo_commands() {
+        assert!(blocked_shell_command("cargo check").is_none());
+        assert!(blocked_shell_command("cargo test --all").is_none());
+        assert!(blocked_shell_command("cargo build --release").is_none());
+    }
+
+    #[test]
+    fn blocks_absolute_path_to_blocked_command() {
+        assert!(blocked_shell_command("/usr/bin/sudo ls").is_some());
+        assert!(blocked_shell_command("/bin/ssh host").is_some());
+    }
+}
+
 pub struct ShellExec;
 
 #[async_trait]
@@ -40,11 +138,8 @@ impl Tool for ShellExec {
         let timeout_secs = std::cmp::min(timeout_secs, 60);
 
         let command_str = command.to_string();
-        let blocked_cmds = ["rm -rf /", "sudo", "curl", "wget", "ssh"];
-        for blocked in blocked_cmds.iter() {
-            if command_str.contains(blocked) {
-                return Err(anyhow::anyhow!("Blocked command detected: {}", blocked));
-            }
+        if let Some(blocked) = blocked_shell_command(&command_str) {
+            return Err(anyhow::anyhow!("Blocked command detected: {}", blocked));
         }
 
         if dry_run {
