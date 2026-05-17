@@ -25,7 +25,8 @@ impl BarqIndex {
 
     pub fn index_repo(&self, path: &str) -> anyhow::Result<()> {
         let ignore_patterns = parse_barqignore(path);
-        
+        let mut file_index: usize = 0;
+
         for entry in WalkDir::new(path).max_depth(5).into_iter().filter_map(|e| e.ok()) {
             let path_str = entry.path().to_string_lossy();
             if path_str.contains("target/") || path_str.contains(".git/") || path_str.contains("node_modules/") {
@@ -39,15 +40,16 @@ impl BarqIndex {
                 if ext_str == "rs" || ext_str == "go" || ext_str == "ts" || ext_str == "py" {
                     tracing::info!("Indexing {}", path_str);
                     if let Ok(content) = fs::read_to_string(entry.path()) {
-                        // chunking is simplified for brevity since full syn parsing is complex for this exercise
+                        // Each file gets a unique, sequential chunk ID so multiple files
+                        // don't overwrite each other in the vector store.
+                        file_index += 1;
                         if ext_str == "rs" {
                             if let Ok(_ast) = syn::parse_file(&content) {
-                                // simulated chunking
-                                self.vector.store(&path_str, 1, "rs", &content);
+                                self.vector.store(&path_str, file_index, "rs", &content);
                                 self.graph.store_relationship(&path_str, vec![]);
                             }
                         } else {
-                            self.vector.store(&path_str, 1, &ext_str, &content);
+                            self.vector.store(&path_str, file_index, &ext_str, &content);
                             self.graph.store_relationship(&path_str, vec![]);
                         }
                     }

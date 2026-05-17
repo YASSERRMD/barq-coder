@@ -157,7 +157,8 @@ impl EditFile {
             }));
         }
 
-        let original = fs::read_to_string(file_path).unwrap_or_default();
+        let original = fs::read_to_string(file_path)
+            .map_err(|e| anyhow::anyhow!("Cannot read {} for patch revert: {}", file_path, e))?;
 
         let patch_tmp = format!("{}.patch.tmp", file_path);
         fs::write(&patch_tmp, patch)?;
