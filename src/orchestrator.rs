@@ -57,9 +57,10 @@ impl Orchestrator {
         let workspace_root = config.workspace_root.clone();
         let model = config.ollama_model.clone();
         let budget_cap = config.budget_cap_usd;
-        let cost = CostTracker::new()
-            .with_model(&model)
-            .with_budget_cap(budget_cap.unwrap_or(f64::MAX));
+        let mut cost = CostTracker::new().with_model(&model);
+        if let Some(cap) = budget_cap {
+            cost = cost.with_budget_cap(cap);
+        }
         Self {
             agent,
             tools,
