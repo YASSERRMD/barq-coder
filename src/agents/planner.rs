@@ -71,8 +71,16 @@ impl PlannerAgent {
             steps: Vec<PlanStep>,
         }
 
+        // Truncate the response in the error message to avoid flooding logs with
+        // the full (potentially very long) LLM output.
+        const MAX_RESPONSE_IN_ERROR: usize = 500;
+        let response_excerpt = if final_response.len() > MAX_RESPONSE_IN_ERROR {
+            format!("{}… [truncated {} chars]", &final_response[..MAX_RESPONSE_IN_ERROR], final_response.len())
+        } else {
+            final_response.clone()
+        };
         let parsed: PlanResponse = serde_json::from_str(json_str)
-            .map_err(|e| anyhow::anyhow!("Failed to parse planner JSON: {}\nResponse was: {}", e, final_response))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse planner JSON: {}\nResponse was: {}", e, response_excerpt))?;
 
         if parsed.steps.is_empty() {
              return Err(anyhow::anyhow!("Planner returned empty steps array"));
