@@ -57,9 +57,10 @@ impl Orchestrator {
         let workspace_root = config.workspace_root.clone();
         let model = config.ollama_model.clone();
         let budget_cap = config.budget_cap_usd;
-        let cost = CostTracker::new()
-            .with_model(&model)
-            .with_budget_cap(budget_cap.unwrap_or(f64::MAX));
+        let mut cost = CostTracker::new().with_model(&model);
+        if let Some(cap) = budget_cap {
+            cost = cost.with_budget_cap(cap);
+        }
         Self {
             agent,
             tools,
@@ -160,10 +161,11 @@ impl Orchestrator {
     pub fn run(&mut self, user_input: &str) -> mpsc::Receiver<OrchestratorEvent> {
         let (tx, rx) = mpsc::channel(256);
 
-        // Build system prompt with fresh context
+        // Build system prompt with fresh BARQ context for this turn.
+        // The system message is always at index 0; replace it on every call so
+        // semantic search results and memory stay current across turns.
         let sys_prompt = self.build_system_prompt(user_input);
 
-        // Initialize conversation if empty
         if self.conversation.is_empty() {
             self.conversation.push(Message {
                 role: "system".to_string(),
@@ -171,6 +173,10 @@ impl Orchestrator {
                 tool_calls: None,
                 tool_call_id: None,
             });
+        } else if let Some(sys_msg) = self.conversation.first_mut() {
+            if sys_msg.role == "system" {
+                sys_msg.content = sys_prompt.clone();
+            }
         }
 
         // Add user message

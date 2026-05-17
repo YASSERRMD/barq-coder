@@ -22,15 +22,22 @@ impl ModelPricing {
     pub fn for_model(model: &str) -> Self {
         match model {
             // OpenAI / proxy
-            m if m.contains("gpt-4o")       => Self::new(0.005,  0.015),
-            m if m.contains("gpt-4-turbo")   => Self::new(0.010,  0.030),
-            m if m.contains("gpt-3.5")       => Self::new(0.0005, 0.0015),
-            // Anthropic
-            m if m.contains("claude-3-5-sonnet") => Self::new(0.003, 0.015),
-            m if m.contains("claude-3-opus")     => Self::new(0.015, 0.075),
-            m if m.contains("claude-3-haiku")    => Self::new(0.00025, 0.00125),
-            // Google / Gemini proxy
-            m if m.contains("gemini-1.5-pro")    => Self::new(0.007, 0.021),
+            m if m.contains("gpt-4o")            => Self::new(0.005,  0.015),
+            m if m.contains("gpt-4-turbo")        => Self::new(0.010,  0.030),
+            m if m.contains("gpt-3.5")            => Self::new(0.0005, 0.0015),
+            // Anthropic Claude 4.x
+            m if m.contains("claude-opus-4")      => Self::new(0.015,  0.075),
+            m if m.contains("claude-sonnet-4")    => Self::new(0.003,  0.015),
+            m if m.contains("claude-haiku-4")     => Self::new(0.00025, 0.00125),
+            // Anthropic Claude 3.x
+            m if m.contains("claude-3-5-sonnet")  => Self::new(0.003,  0.015),
+            m if m.contains("claude-3-opus")      => Self::new(0.015,  0.075),
+            m if m.contains("claude-3-haiku")     => Self::new(0.00025, 0.00125),
+            // Google Gemini proxy
+            m if m.contains("gemini-2.5-pro")     => Self::new(0.00125, 0.010),
+            m if m.contains("gemini-2.0-flash")   => Self::new(0.000075, 0.0003),
+            m if m.contains("gemini-1.5-pro")     => Self::new(0.007,  0.021),
+            m if m.contains("gemini-1.5-flash")   => Self::new(0.000075, 0.0003),
             // Ollama local — effectively free
             _ => Self::new(0.0, 0.0),
         }
