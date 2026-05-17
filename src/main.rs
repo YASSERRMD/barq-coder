@@ -1,4 +1,7 @@
-#![allow(unused)]
+// Broad dead_code allow is intentional: collab, voice, mcp, lsp and sandbox
+// modules are early-stage and contain placeholder implementations.
+// Individual unused-import / unused-variable warnings are still reported.
+#![allow(dead_code)]
 
 use crossterm::{
     event::{
