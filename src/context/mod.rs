@@ -162,6 +162,8 @@ pub fn auto_compact(messages: &mut Vec<Message>, keep_recent: usize) {
 // Snip Compact: Truncate large tool outputs in history
 // ─────────────────────────────────────────────────────────────────────────────
 
+
+
 /// Replace extremely long tool outputs with a snipped marker to save tokens,
 /// while keeping the record that the tool was called.
 pub fn snip_compact(messages: &mut Vec<Message>) {
@@ -184,3 +186,150 @@ pub fn snip_compact(messages: &mut Vec<Message>) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::Message;
+
+    fn make_msg(role: &str, content: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    // ── ContextBudget ────────────────────────────────────────────────────────
+
+    #[test]
+    fn context_budget_needs_compact_when_over_threshold() {
+        let budget = ContextBudget::new(100); // 80-token compact threshold
+        // 4 chars ≈ 1 token → 320 chars ≈ 80 tokens (at the threshold)
+        let messages = vec![make_msg("user", &"a".repeat(324))]; // just over 80 tokens
+        assert!(budget.needs_compact(&messages));
+    }
+
+    #[test]
+    fn context_budget_no_compact_when_under_threshold() {
+        let budget = ContextBudget::new(100);
+        let messages = vec![make_msg("user", "hello")]; // ~1 token
+        assert!(!budget.needs_compact(&messages));
+    }
+
+    #[test]
+    fn context_budget_remaining_is_saturating() {
+        let budget = ContextBudget::new(10);
+        // 1000 chars ≈ 250 tokens >> 10 token budget → remaining saturates to 0
+        let messages = vec![make_msg("user", &"x".repeat(1000))];
+        assert_eq!(budget.remaining(&messages), 0);
+    }
+
+    #[test]
+    fn context_budget_usage_percent_is_reasonable() {
+        let budget = ContextBudget::new(100);
+        // 200 chars ≈ 50 tokens → 50% of 100-token budget
+        let messages = vec![make_msg("user", &"a".repeat(200))];
+        let pct = budget.usage_percent(&messages);
+        assert!((45.0..=55.0).contains(&pct), "expected ~50%, got {pct}");
+    }
+
+    // ── auto_compact ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn auto_compact_preserves_system_and_recent_messages() {
+        let mut messages = vec![
+            make_msg("system", "You are a coder."),
+            make_msg("user", "step 1"),
+            make_msg("assistant", "done 1"),
+            make_msg("user", "step 2"),
+            make_msg("assistant", "done 2"),
+            make_msg("user", "step 3"),   // recent
+            make_msg("assistant", "done 3"), // recent
+        ];
+        auto_compact(&mut messages, 2); // keep last 2
+        // System message must still be first
+        assert_eq!(messages[0].role, "system");
+        // Last 2 messages must be retained verbatim
+        assert_eq!(messages.last().unwrap().content, "done 3");
+    }
+
+    #[test]
+    fn auto_compact_inserts_compact_boundary_marker() {
+        let mut messages = vec![
+            make_msg("system", "sys"),
+            make_msg("user", "q1"),
+            make_msg("assistant", "a1"),
+            make_msg("user", "q2"),      // recent
+            make_msg("assistant", "a2"), // recent
+        ];
+        auto_compact(&mut messages, 2);
+        // A compact boundary message must appear between system and recent
+        let boundary = messages
+            .iter()
+            .find(|m| m.content.starts_with(COMPACT_BOUNDARY_PREFIX));
+        assert!(boundary.is_some(), "compact boundary marker missing");
+    }
+
+    #[test]
+    fn auto_compact_is_noop_when_not_enough_messages() {
+        let mut messages = vec![
+            make_msg("system", "sys"),
+            make_msg("user", "q"),
+        ];
+        let original_len = messages.len();
+        auto_compact(&mut messages, 10); // keep_recent > available
+        assert_eq!(messages.len(), original_len);
+    }
+
+    // ── snip_compact ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn snip_compact_truncates_long_tool_output() {
+        let long_output = "x".repeat(3000);
+        let mut messages = vec![
+            make_msg("system", "sys"),
+            make_msg("tool", &long_output),
+            make_msg("user", "q1"),
+            make_msg("user", "q2"),
+            make_msg("user", "q3"),
+            make_msg("user", "q4"), // recent (save_recent = 5)
+            make_msg("user", "q5"),
+        ];
+        snip_compact(&mut messages);
+        assert!(messages[1].content.contains("[SNIPPED_OUTPUT:"));
+        assert!(messages[1].content.len() < long_output.len());
+    }
+
+    #[test]
+    fn snip_compact_does_not_touch_recent_messages() {
+        let long_output = "y".repeat(3000);
+        // All messages are "recent" (≤ save_recent = 5)
+        let mut messages = vec![
+            make_msg("tool", &long_output),
+            make_msg("user", "q1"),
+            make_msg("user", "q2"),
+            make_msg("user", "q3"),
+            make_msg("user", "q4"),
+        ];
+        snip_compact(&mut messages);
+        // Should not have been snipped — all are within save_recent window
+        assert!(!messages[0].content.contains("[SNIPPED_OUTPUT:"));
+    }
+
+    #[test]
+    fn snip_compact_ignores_short_tool_outputs() {
+        let short_output = "small output";
+        let mut messages = vec![
+            make_msg("system", "sys"),
+            make_msg("tool", short_output),
+            make_msg("user", "q1"),
+            make_msg("user", "q2"),
+            make_msg("user", "q3"),
+            make_msg("user", "q4"),
+            make_msg("user", "q5"),
+        ];
+        snip_compact(&mut messages);
+        assert_eq!(messages[1].content, short_output);
+    }
+}
