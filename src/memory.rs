@@ -1,5 +1,10 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Maximum number of ancestor directories to search for `.barqcoder.md` files.
+/// Prevents traversing the entire filesystem on deep workspace trees.
+const MAX_PARENT_WALK_DEPTH: usize = 5;
 
 /// Project memory file — equivalent to Claude Code's CLAUDE.md.
 /// Loaded from `.barqcoder.md` in the workspace root and parent dirs.
@@ -14,21 +19,28 @@ pub struct MemoryEntry {
 }
 
 impl Memory {
-    /// Load memory from the workspace directory and all parent directories.
+    /// Load memory from the workspace directory and up to `MAX_PARENT_WALK_DEPTH`
+    /// ancestor directories. Duplicate entries (same trimmed text) are omitted.
     pub fn load(workspace_root: &str) -> Self {
         let workspace = Path::new(workspace_root);
         let path = workspace.join(".barqcoder.md");
         let mut entries = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut depth = 0;
 
-        // Walk upward from workspace to filesystem root, collecting memory
         let mut current = Some(workspace.to_path_buf());
         while let Some(dir) = current {
+            if depth >= MAX_PARENT_WALK_DEPTH {
+                break;
+            }
+            depth += 1;
+
             let mem_file = dir.join(".barqcoder.md");
             if mem_file.exists() {
                 if let Ok(content) = fs::read_to_string(&mem_file) {
                     for line in content.lines() {
                         let trimmed = line.trim();
-                        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        if !trimmed.is_empty() && !trimmed.starts_with('#') && seen.insert(trimmed.to_string()) {
                             entries.push(MemoryEntry { content: trimmed.to_string() });
                         }
                     }
