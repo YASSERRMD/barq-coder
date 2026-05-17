@@ -27,7 +27,7 @@ impl Verifier {
 
     pub async fn verify_edit(
         &self,
-        _file_path: &str,
+        file_path: &str,
         original: &str,
         patched: &str,
     ) -> VerifyResult {
@@ -90,13 +90,13 @@ impl Verifier {
         let borrow_hints = symbolic::borrow_hint::analyze_borrows(patched);
         warnings.extend(borrow_hints);
         
-        let dead_code = symbolic::dead_code::detect_dead_code(_file_path, patched);
+        let dead_code = symbolic::dead_code::detect_dead_code(file_path, patched);
         warnings.extend(dead_code);
         
         let type_errors = symbolic::type_check::verify_trait_bounds(patched);
         errors.extend(type_errors);
         
-        let cycle_errors = symbolic::cycle_detect::detect_cycles(_file_path);
+        let cycle_errors = symbolic::cycle_detect::detect_cycles(file_path);
         errors.extend(cycle_errors);
         
         let security_diags = symbolic::security::scan_security_patterns(patched);
