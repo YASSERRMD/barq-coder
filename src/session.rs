@@ -187,14 +187,27 @@ impl SessionStore {
     }
 
     /// Load all events from a session JSONL file.
+    /// Lines that fail to deserialize are skipped with a warning rather than
+    /// silently dropped, so callers can detect transcript corruption.
     pub fn load(&self, id: &str) -> anyhow::Result<Vec<SessionEvent>> {
         let path = self.session_path(id);
-        let content = fs::read_to_string(path)?;
-        let events: Vec<SessionEvent> = content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
+        let content = fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read session '{}': {}", id, e))?;
+        let mut events = Vec::new();
+        for (line_no, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<SessionEvent>(line) {
+                Ok(ev) => events.push(ev),
+                Err(e) => {
+                    tracing::warn!(
+                        "session '{}' line {}: skipping malformed event: {}",
+                        id, line_no + 1, e
+                    );
+                }
+            }
+        }
         Ok(events)
     }
 
@@ -243,8 +256,15 @@ impl SessionStore {
     }
 
     /// Replay a session's events as an iterator.
+    /// Logs a warning and returns an empty iterator if the session cannot be loaded.
     pub fn replay(&self, id: &str) -> impl Iterator<Item = SessionEvent> {
-        self.load(id).unwrap_or_default().into_iter()
+        match self.load(id) {
+            Ok(events) => events.into_iter(),
+            Err(e) => {
+                tracing::warn!("Could not replay session '{}': {}", id, e);
+                Vec::new().into_iter()
+            }
+        }
     }
 }
 
