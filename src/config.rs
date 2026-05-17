@@ -47,15 +47,101 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Load configuration with the following precedence (highest → lowest):
+    /// 1. Environment variables (`BARQ_*`)
+    /// 2. `Config.toml` file values
+    /// 3. Built-in defaults
     pub fn load() -> Self {
-        if Path::new("Config.toml").exists() {
-            if let Ok(content) = fs::read_to_string("Config.toml") {
-                if let Ok(config) = toml::from_str(&content) {
-                    return config;
+        let mut config = if Path::new("Config.toml").exists() {
+            match fs::read_to_string("Config.toml") {
+                Ok(content) => match toml::from_str::<Config>(&content) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Warning: Config.toml is malformed ({e}); using defaults.");
+                        Self::default()
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Warning: could not read Config.toml ({e}); using defaults.");
+                    Self::default()
                 }
             }
+        } else {
+            Self::default()
+        };
+
+        config.apply_env_overrides();
+        config
+    }
+
+    /// Apply `BARQ_*` environment variable overrides on top of file/default values.
+    fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("BARQ_OLLAMA_URL") {
+            self.ollama_base_url = v;
         }
-        Self::default()
+        if let Ok(v) = std::env::var("BARQ_MODEL") {
+            self.ollama_model = v;
+        }
+        if let Ok(v) = std::env::var("BARQ_BARQDB_URL") {
+            self.barqdb_url = v;
+        }
+        if let Ok(v) = std::env::var("BARQ_BARQGRAPH_URL") {
+            self.barqgraph_url = v;
+        }
+        if let Ok(v) = std::env::var("BARQ_WORKSPACE") {
+            self.workspace_root = v;
+        }
+        if let Ok(v) = std::env::var("BARQ_MAX_ITERATIONS") {
+            if let Ok(n) = v.parse::<u8>() {
+                self.max_iterations = n;
+            } else {
+                eprintln!("Warning: BARQ_MAX_ITERATIONS='{v}' is not a valid u8; ignoring.");
+            }
+        }
+        if let Ok(v) = std::env::var("BARQ_TOKEN_LIMIT") {
+            if let Ok(n) = v.parse::<u32>() {
+                self.token_limit = n;
+            } else {
+                eprintln!("Warning: BARQ_TOKEN_LIMIT='{v}' is not a valid u32; ignoring.");
+            }
+        }
+        if let Ok(v) = std::env::var("BARQ_BUDGET_CAP_USD") {
+            if let Ok(f) = v.parse::<f64>() {
+                self.budget_cap_usd = Some(f);
+            } else {
+                eprintln!("Warning: BARQ_BUDGET_CAP_USD='{v}' is not a valid f64; ignoring.");
+            }
+        }
+    }
+
+    /// Validate configuration values. Returns a list of validation error messages.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        if self.ollama_base_url.is_empty() {
+            errors.push("ollama_base_url must not be empty".to_string());
+        }
+        if self.ollama_model.is_empty() {
+            errors.push("ollama_model must not be empty".to_string());
+        }
+        if self.max_iterations == 0 {
+            errors.push("max_iterations must be at least 1".to_string());
+        }
+        if self.token_limit < 256 {
+            errors.push(format!(
+                "token_limit ({}) is dangerously low; minimum recommended is 256",
+                self.token_limit
+            ));
+        }
+        if let Some(cap) = self.budget_cap_usd {
+            if cap <= 0.0 {
+                errors.push(format!(
+                    "budget_cap_usd ({cap}) must be a positive value"
+                ));
+            }
+        }
+
+        errors
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
