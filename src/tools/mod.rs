@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use crate::barq::BarqIndex;
+use crate::tasks::TaskBoard;
 
 pub mod cargo_check;
 pub mod barq_search;
@@ -152,33 +154,37 @@ pub trait Tool: Send + Sync {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool Registry — holds all registered tools.
+// `tools` preserves registration order for schema/prompt generation.
+// `index` gives O(1) lookup by name.
 // ─────────────────────────────────────────────────────────────────────────────
 pub struct ToolRegistry {
     pub tools: Vec<Box<dyn Tool + Send + Sync>>,
+    index: HashMap<String, usize>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self {
-            tools: vec![
-                Box::new(cargo_check::CargoCheck),
-                Box::new(edit_file::EditFile),
-                Box::new(shell::ShellExec),
-                Box::new(shell::GitTool),
-                Box::new(file_ops::ReadFile),
-                Box::new(file_ops::ListFiles),
-                Box::new(file_ops::CreateFile),
-                Box::new(workspace::WorkspaceTool::new(".")),
-                Box::new(bench::CargoBench),
-                Box::new(glob::GlobTool),
-                Box::new(grep::GrepTool),
-                Box::new(web_fetch::WebFetchTool),
-                Box::new(file_history::FileHistoryTool::new()),
-                Box::new(tool_search::ToolSearchTool),
-                Box::new(notebook_edit::NotebookEditTool),
-                Box::new(python_tool::PythonTool),
-            ],
-        }
+        let mut registry = Self {
+            tools: Vec::new(),
+            index: HashMap::new(),
+        };
+        registry.register(Box::new(cargo_check::CargoCheck));
+        registry.register(Box::new(edit_file::EditFile));
+        registry.register(Box::new(shell::ShellExec));
+        registry.register(Box::new(shell::GitTool));
+        registry.register(Box::new(file_ops::ReadFile));
+        registry.register(Box::new(file_ops::ListFiles));
+        registry.register(Box::new(file_ops::CreateFile));
+        registry.register(Box::new(workspace::WorkspaceTool::new(".")));
+        registry.register(Box::new(bench::CargoBench));
+        registry.register(Box::new(glob::GlobTool));
+        registry.register(Box::new(grep::GrepTool));
+        registry.register(Box::new(web_fetch::WebFetchTool));
+        registry.register(Box::new(file_history::FileHistoryTool::new()));
+        registry.register(Box::new(tool_search::ToolSearchTool));
+        registry.register(Box::new(notebook_edit::NotebookEditTool));
+        registry.register(Box::new(python_tool::PythonTool));
+        registry
     }
 
     pub fn with_barq(barq: Arc<BarqIndex>) -> Self {
@@ -187,12 +193,25 @@ impl ToolRegistry {
         registry
     }
 
-    pub fn register(&mut self, tool: Box<dyn Tool + Send + Sync>) {
-        self.tools.push(tool);
+    /// Extend the registry with task-board tools. Call after `new()` or `with_barq()`.
+    pub fn with_task_board(mut self, task_board: Arc<TaskBoard>) -> Self {
+        self.register(Box::new(task_tools::TaskCreateTool::new(Arc::clone(&task_board))));
+        self.register(Box::new(task_tools::TaskUpdateTool::new(Arc::clone(&task_board))));
+        self.register(Box::new(task_tools::TaskListTool::new(task_board)));
+        self
     }
 
+    /// Register a tool, updating the name index for O(1) later lookups.
+    pub fn register(&mut self, tool: Box<dyn Tool + Send + Sync>) {
+        let name = tool.name().to_string();
+        let idx = self.tools.len();
+        self.tools.push(tool);
+        self.index.insert(name, idx);
+    }
+
+    /// O(1) tool lookup by name.
     pub fn get(&self, name: &str) -> Option<&Box<dyn Tool + Send + Sync>> {
-        self.tools.iter().find(|t| t.name() == name)
+        self.index.get(name).and_then(|&i| self.tools.get(i))
     }
 
     pub fn schemas(&self) -> Vec<Value> {
