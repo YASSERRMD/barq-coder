@@ -1,10 +1,10 @@
-use crate::agent::{OllamaClient, StreamEvent};
+use barq_ir::{AgentMessage, StreamEvent};
 use crate::barq::BarqIndex;
+use crate::providers::ProviderAdapter;
 use crate::sandbox::{GateResult, VerificationGate};
 use crate::tools::ToolRegistry;
 use std::sync::Arc;
 
-/// Progress events emitted by the CoderAgent during a step.
 #[derive(Debug, Clone)]
 pub enum CoderProgress {
     Thinking(String),
@@ -18,22 +18,19 @@ pub enum CoderProgress {
 }
 
 pub struct CoderAgent {
-    pub llm: OllamaClient,
+    pub llm: Arc<dyn ProviderAdapter>,
     pub barq: Arc<BarqIndex>,
     pub tools: Arc<ToolRegistry>,
 }
 
 impl CoderAgent {
-    pub fn new(llm: OllamaClient, barq: Arc<BarqIndex>, tools: Arc<ToolRegistry>) -> Self {
+    pub fn new(llm: Arc<dyn ProviderAdapter>, barq: Arc<BarqIndex>, tools: Arc<ToolRegistry>) -> Self {
         Self { llm, barq, tools }
     }
 
-    /// Implement a task step using the Verification-First contract.
-    ///
-    /// All file writes go into `VerificationGate`'s shadow workspace.
-    /// The gate runs `cargo check` + `cargo test` before producing the patch.
-    /// The patch is returned via `GateResult` — the coordinator / TUI decides
-    /// whether to present it to the user for approval before applying.
+    /// Implement a task step with verification-first contract.
+    /// All file writes go into VerificationGate's shadow workspace.
+    /// cargo check + cargo test run before the patch is produced.
     pub async fn implement_step_verified(
         &self,
         step_id: &str,
@@ -41,7 +38,6 @@ impl CoderAgent {
         workspace_root: &str,
         progress_tx: Option<tokio::sync::mpsc::Sender<CoderProgress>>,
     ) -> anyhow::Result<GateResult> {
-        // Create an isolated shadow workspace for this step.
         let gate = VerificationGate::new(workspace_root, Arc::clone(&self.barq)).await?;
 
         let context = self.barq.query(description, 5);
@@ -65,16 +61,8 @@ impl CoderAgent {
         );
 
         let mut messages = vec![
-            rusty_ollama::ChatMessage {
-                role: "system".to_string(),
-                content: crate::agents::AgentRole::Coder.system_prompt().to_string(),
-                tool_calls: None,
-            },
-            rusty_ollama::ChatMessage {
-                role: "user".to_string(),
-                content: prompt,
-                tool_calls: None,
-            },
+            AgentMessage::system(crate::agents::AgentRole::Coder.system_prompt()),
+            AgentMessage::user(prompt),
         ];
 
         let tool_schemas = self.tools.schemas();
@@ -82,112 +70,99 @@ impl CoderAgent {
 
         for _ in 0..max_iterations {
             let mut rx = self.llm.chat_stream(messages.clone(), Some(tool_schemas.clone()));
-
             let mut iter_response = String::new();
             let mut tool_calls = Vec::new();
 
             while let Some(event) = rx.recv().await {
                 match event {
-                    StreamEvent::Token(text) => {
+                    StreamEvent::TextDelta { content } => {
                         if let Some(tx) = &progress_tx {
-                            let _ = tx.send(CoderProgress::Thinking(text.clone())).await;
+                            let _ = tx.send(CoderProgress::Thinking(content.clone())).await;
                         }
-                        iter_response.push_str(&text);
+                        iter_response.push_str(&content);
                     }
-                    StreamEvent::ToolCall(t) => tool_calls.push(t),
-                    StreamEvent::Done => break,
-                    StreamEvent::Error(e) => return Err(anyhow::anyhow!("Coder LLM error: {}", e)),
+                    StreamEvent::ToolCallDone { payload } => tool_calls.push(payload),
+                    StreamEvent::Finish { .. } => break,
+                    StreamEvent::Error { message, .. } => {
+                        return Err(anyhow::anyhow!("Coder LLM error: {}", message))
+                    }
                     _ => {}
                 }
             }
 
-            // Check for completion sentinel.
             if iter_response.contains("IMPLEMENTATION_COMPLETE") {
                 break;
             }
 
             if tool_calls.is_empty() {
-                // No more tool calls and no sentinel — treat as done.
                 break;
             }
 
-            messages.push(rusty_ollama::ChatMessage {
-                role: "assistant".to_string(),
-                content: iter_response.clone(),
-                tool_calls: Some(tool_calls.clone()),
-            });
+            messages.push(AgentMessage::assistant_with_tools(
+                iter_response.clone(),
+                tool_calls.clone(),
+            ));
 
             for tc in &tool_calls {
-                let tool_name = &tc.function.name;
-                let args = tc.function.arguments.clone();
-
                 if let Some(tx) = &progress_tx {
                     let _ = tx
                         .send(CoderProgress::ToolCall {
-                            name: tool_name.clone(),
-                            args: args.to_string(),
+                            name: tc.name.clone(),
+                            args: tc.arguments.to_string(),
                         })
                         .await;
                 }
 
-                // If the tool writes a file, intercept it to the shadow workspace.
-                let tool_result = if tool_name == "edit_file" || tool_name == "create_file" {
-                    // Extract path + content from args.
-                    let path = args
-                        .get("path")
-                        .or_else(|| args.get("file_path"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let content = args
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                let tool_result =
+                    if tc.name == "edit_file" || tc.name == "create_file" {
+                        let path = tc.arguments
+                            .get("path")
+                            .or_else(|| tc.arguments.get("file_path"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let content = tc.arguments
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
 
-                    if !path.is_empty() {
-                        if let Some(tx) = &progress_tx {
-                            let _ = tx
-                                .send(CoderProgress::ShadowWrite { path: path.clone() })
-                                .await;
+                        if !path.is_empty() {
+                            if let Some(tx) = &progress_tx {
+                                let _ = tx.send(CoderProgress::ShadowWrite { path: path.clone() }).await;
+                            }
+                            match gate.stage_file(&path, &content).await {
+                                Ok(()) => serde_json::json!({"ok": true, "staged": path}),
+                                Err(e) => serde_json::json!({"error": e.to_string()}),
+                            }
+                        } else {
+                            serde_json::json!({"error": "No path provided"})
                         }
-                        match gate.stage_file(&path, &content).await {
-                            Ok(()) => serde_json::json!({"ok": true, "staged": path}),
-                            Err(e) => serde_json::json!({"error": e.to_string()}),
-                        }
-                    } else {
-                        serde_json::json!({"error": "No path provided"})
-                    }
-                } else {
-                    // All other tools execute normally against the real workspace.
-                    if let Some(tool) = self.tools.get(tool_name) {
-                        match tool.call(args.clone()).await {
+                    } else if let Some(tool) = self.tools.get(&tc.name) {
+                        match tool.call(tc.arguments.clone()).await {
                             Ok(res) => res,
                             Err(e) => serde_json::json!({"error": e.to_string()}),
                         }
                     } else {
-                        serde_json::json!({"error": format!("Tool not found: {}", tool_name)})
-                    }
-                };
+                        serde_json::json!({"error": format!("Tool not found: {}", tc.name)})
+                    };
 
                 if let Some(tx) = &progress_tx {
                     let _ = tx
                         .send(CoderProgress::ToolResult {
-                            name: tool_name.clone(),
+                            name: tc.name.clone(),
                             result: tool_result.to_string(),
                         })
                         .await;
                 }
 
-                messages.push(rusty_ollama::ChatMessage {
-                    role: "tool".to_string(),
-                    content: tool_result.to_string(),
-                    tool_calls: None,
-                });
+                messages.push(AgentMessage::tool_result(
+                    tc.id.clone(),
+                    tool_result.to_string(),
+                ));
             }
         }
 
-        // --- Verification Gate ---
         if let Some(tx) = &progress_tx {
             let _ = tx.send(CoderProgress::VerificationStarted).await;
         }
@@ -214,18 +189,14 @@ impl CoderAgent {
         Ok(gate_result)
     }
 
-    // ── Legacy non-verified path (kept for backwards compat / headless mode) ──
-
-    pub async fn implement_step(
-        &self,
-        step_id: &str,
-        description: &str,
-    ) -> anyhow::Result<String> {
+    pub async fn implement_step(&self, step_id: &str, description: &str) -> anyhow::Result<String> {
         let context = self.barq.query(description, 5);
         let mut context_str = String::new();
         for res in context {
-            context_str
-                .push_str(&format!("File: {}\nContent:\n{}\n\n", res.file_path, res.content));
+            context_str.push_str(&format!(
+                "File: {}\nContent:\n{}\n\n",
+                res.file_path, res.content
+            ));
         }
 
         let prompt = format!(
@@ -234,16 +205,8 @@ impl CoderAgent {
         );
 
         let mut messages = vec![
-            rusty_ollama::ChatMessage {
-                role: "system".to_string(),
-                content: crate::agents::AgentRole::Coder.system_prompt().to_string(),
-                tool_calls: None,
-            },
-            rusty_ollama::ChatMessage {
-                role: "user".to_string(),
-                content: prompt,
-                tool_calls: None,
-            },
+            AgentMessage::system(crate::agents::AgentRole::Coder.system_prompt()),
+            AgentMessage::user(prompt),
         ];
 
         let tool_schemas = self.tools.schemas();
@@ -256,10 +219,12 @@ impl CoderAgent {
 
             while let Some(event) = rx.recv().await {
                 match event {
-                    StreamEvent::Token(text) => iter_response.push_str(&text),
-                    StreamEvent::ToolCall(t) => tool_calls.push(t),
-                    StreamEvent::Done => break,
-                    StreamEvent::Error(e) => return Err(anyhow::anyhow!("Coder LLM error: {}", e)),
+                    StreamEvent::TextDelta { content } => iter_response.push_str(&content),
+                    StreamEvent::ToolCallDone { payload } => tool_calls.push(payload),
+                    StreamEvent::Finish { .. } => break,
+                    StreamEvent::Error { message, .. } => {
+                        return Err(anyhow::anyhow!("Coder LLM error: {}", message))
+                    }
                     _ => {}
                 }
             }
@@ -269,27 +234,18 @@ impl CoderAgent {
                 break;
             }
 
-            messages.push(rusty_ollama::ChatMessage {
-                role: "assistant".to_string(),
-                content: iter_response,
-                tool_calls: Some(tool_calls.clone()),
-            });
+            messages.push(AgentMessage::assistant_with_tools(iter_response, tool_calls.clone()));
 
             for tc in tool_calls {
-                let mut result = String::new();
-                if let Some(tool) = self.tools.get(&tc.function.name) {
-                    match tool.call(tc.function.arguments.clone()).await {
-                        Ok(res) => result = res.to_string(),
-                        Err(e) => result = format!("Error: {}", e),
+                let result = if let Some(tool) = self.tools.get(&tc.name) {
+                    match tool.call(tc.arguments.clone()).await {
+                        Ok(res) => res.to_string(),
+                        Err(e) => format!("Error: {}", e),
                     }
                 } else {
-                    result = format!("Tool not found: {}", tc.function.name);
-                }
-                messages.push(rusty_ollama::ChatMessage {
-                    role: "tool".to_string(),
-                    content: result,
-                    tool_calls: None,
-                });
+                    format!("Tool not found: {}", tc.name)
+                };
+                messages.push(AgentMessage::tool_result(tc.id, result));
             }
         }
 

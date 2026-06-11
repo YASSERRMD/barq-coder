@@ -1,16 +1,15 @@
-use crate::agent::{Message, OllamaClient, StreamEvent};
+use barq_ir::{AgentMessage, MessageRole, StreamEvent, ToolCallPayload};
 use crate::barq::BarqIndex;
 use crate::config::Config;
-use crate::cost_tracker::{BudgetStatus, CostTracker};
-use crate::tools::ToolRegistry;
 use crate::context::{auto_compact, ContextBudget, symbolic_injector::SymbolicInjector};
+use crate::cost_tracker::CostTracker;
 use crate::memory::Memory;
+use crate::permissions::PermissionManager;
+use crate::providers::ProviderAdapter;
+use crate::tools::ToolRegistry;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-
-use crate::permissions::PermissionManager;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 pub enum OrchestratorEvent {
     Token(String),
@@ -22,24 +21,18 @@ pub enum OrchestratorEvent {
         reason: String,
         tx: oneshot::Sender<bool>,
     },
-    /// Budget approaching cap — TUI shows a warning badge.
     BudgetWarning { used_usd: f64, cap_usd: f64, pct: u8 },
-    /// Budget cap hit — agent loop is paused. TUI must send confirmation.
-    BudgetPaused {
-        used_usd: f64,
-        cap_usd: f64,
-        tx: oneshot::Sender<bool>,
-    },
+    BudgetPaused { used_usd: f64, cap_usd: f64, tx: oneshot::Sender<bool> },
     Done(String),
     Error(String),
 }
 
 pub struct Orchestrator {
-    pub agent: OllamaClient,
+    pub agent: Arc<dyn ProviderAdapter>,
     pub tools: Arc<ToolRegistry>,
     pub barq: Arc<BarqIndex>,
     pub config: Config,
-    pub conversation: Vec<Message>,
+    pub conversation: Vec<AgentMessage>,
     pub total_tokens: usize,
     pub budget: ContextBudget,
     pub permissions: Arc<PermissionManager>,
@@ -48,19 +41,18 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     pub fn new(
-        agent: OllamaClient,
+        agent: Arc<dyn ProviderAdapter>,
         tools: Arc<ToolRegistry>,
         barq: Arc<BarqIndex>,
         config: Config,
     ) -> Self {
         let token_limit = config.token_limit;
         let workspace_root = config.workspace_root.clone();
-        let model = config.ollama_model.clone();
+        let model = agent.model_id().to_string();
         let budget_cap = config.budget_cap_usd;
-        let mut cost = CostTracker::new().with_model(&model);
-        if let Some(cap) = budget_cap {
-            cost = cost.with_budget_cap(cap);
-        }
+        let cost = CostTracker::new()
+            .with_model(&model)
+            .with_budget_cap(budget_cap.unwrap_or(f64::MAX));
         Self {
             agent,
             tools,
@@ -74,11 +66,10 @@ impl Orchestrator {
         }
     }
 
-    /// Build the system prompt with BARQ context injected.
     fn build_system_prompt(&self, user_input: &str) -> String {
         let barq_results = self.barq.query(user_input, 10);
         let mut context_str = String::new();
-        let barq_budget = 4000; // Hard limit 4k chars for contextual data
+        let barq_budget = 4000;
         for r in barq_results {
             let chunk = format!("{}:\n{}\n", r.file_path, r.content);
             if context_str.len() + chunk.len() > barq_budget {
@@ -88,20 +79,20 @@ impl Orchestrator {
             context_str.push_str(&chunk);
         }
 
-        // Step 2: query GraphDB for dependency context
         let graph_deps = self.barq.graph_deps("main");
         let deps_str = graph_deps.join(", ");
 
-        // Step 3: build tool descriptions for the system prompt
+        let tier = self.agent.trust_tier();
         let mut tool_desc = String::new();
         for tool in &self.tools.tools {
-            tool_desc.push_str(&format!("- {}: {}\n", tool.name(), tool.description()));
+            if tier.permits_tool(tool.name()) {
+                tool_desc.push_str(&format!("- {}: {}\n", tool.name(), tool.description()));
+            }
         }
 
         let memory = Memory::load(&self.config.workspace_root);
         let memory_str = memory.to_prompt_block();
 
-        // Step 4: Symbolic context (Ast Caller Graph)
         let injector = SymbolicInjector::new(Arc::clone(&self.barq));
         let symbolic_ctx = injector.inject(user_input);
 
@@ -120,12 +111,12 @@ impl Orchestrator {
             \n\
             RULES:\n\
             1. ALWAYS reference the BARQ context before suggesting code changes.\n\
-            2. When asked to write code or create an application, YOU MUST use the `shell_exec` or `edit_file` tools to write it to the filesystem. NEVER output raw implementation code directly in the chat.\n\
+            2. When asked to write code or create an application, YOU MUST use the `shell_exec` or `edit_file` tools to write it to the filesystem.\n\
             3. Use tools in this order: barq_search -> edit_file -> cargo_check.\n\
-            4. NEVER apply edits without running cargo_check afterward (if a rust project).\n\
+            4. NEVER apply edits without running cargo_check afterward (if a Rust project).\n\
             5. If cargo_check fails, fix errors before giving a final answer.\n\
-            6. When you need to use a tool, call it through the model's native tool-calling interface. DO NOT print JSON wrappers, tool call objects, or schema-shaped payloads in assistant text.\n\
-            7. Respond to the user in normal plain language. NEVER answer with a JSON envelope unless the user explicitly asks for JSON.\n\
+            6. Call tools through the model's native tool-calling interface — do NOT print JSON wrappers in assistant text.\n\
+            7. Respond in plain language. NEVER answer with a JSON envelope unless explicitly asked.\n\
             \n\
             {}\n\
             \n\
@@ -134,11 +125,16 @@ impl Orchestrator {
         )
     }
 
-    /// Build tool schemas in the Ollama tools format.
     fn build_tool_schemas(&self) -> Vec<Value> {
+        let caps = self.agent.capabilities();
+        if !caps.can_use_tools() {
+            return Vec::new();
+        }
+        let tier = self.agent.trust_tier();
         self.tools
             .tools
             .iter()
+            .filter(|t| tier.permits_tool(t.name()))
             .map(|t| {
                 serde_json::json!({
                     "type": "function",
@@ -152,68 +148,33 @@ impl Orchestrator {
             .collect()
     }
 
-    /// Estimate token count for a string (rough: 1 token per 4 chars).
-    fn estimate_tokens(text: &str) -> usize {
-        text.len() / 4
-    }
-
-    /// Run the agent loop. Returns a channel that emits OrchestratorEvents.
     pub fn run(&mut self, user_input: &str) -> mpsc::Receiver<OrchestratorEvent> {
         let (tx, rx) = mpsc::channel(256);
 
-        // Build system prompt with fresh BARQ context for this turn.
-        // The system message is always at index 0; replace it on every call so
-        // semantic search results and memory stay current across turns.
         let sys_prompt = self.build_system_prompt(user_input);
 
         if self.conversation.is_empty() {
-            self.conversation.push(Message {
-                role: "system".to_string(),
-                content: sys_prompt.clone(),
-                tool_calls: None,
-                tool_call_id: None,
-            });
-        } else if let Some(sys_msg) = self.conversation.first_mut() {
-            if sys_msg.role == "system" {
-                sys_msg.content = sys_prompt.clone();
-            }
+            self.conversation.push(AgentMessage::system(sys_prompt));
         }
 
-        // Add user message
-        self.conversation.push(Message {
-            role: "user".to_string(),
-            content: user_input.to_string(),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-
-        // Update token estimate
+        self.conversation.push(AgentMessage::user(user_input));
         self.total_tokens = crate::context::total_tokens(&self.conversation);
 
-        // Snip large tool outputs first
         crate::context::snip_compact(&mut self.conversation);
         self.total_tokens = crate::context::total_tokens(&self.conversation);
 
-        // Auto-compact if exceeding budget threshold
         if self.budget.needs_compact(&self.conversation) {
-            auto_compact(&mut self.conversation, 10); // Keep last 10 messages
+            auto_compact(&mut self.conversation, 10);
             self.total_tokens = crate::context::total_tokens(&self.conversation);
         }
 
-        // Convert to ChatMessage format for the API
-        let messages: Vec<rusty_ollama::ChatMessage> = self
-            .conversation
-            .iter()
-            .map(|m| m.to_chat_message())
-            .collect();
-
+        let messages = self.conversation.clone();
         let tool_schemas = self.build_tool_schemas();
         let tools = Arc::clone(&self.tools);
         let permissions = Arc::clone(&self.permissions);
         let max_iterations = self.config.max_iterations;
-        let agent = self.agent.clone();
+        let agent = Arc::clone(&self.agent);
 
-        // Spawn the agent loop
         tokio::spawn(async move {
             let mut current_messages = messages;
             let mut iteration: u8 = 0;
@@ -231,73 +192,56 @@ impl Orchestrator {
 
                 iteration += 1;
 
-                // ── Budget enforcement check ─────────────────────────────────
-                // (cost is tracked per-turn in the outer App; here we send
-                //  a pre-computed snapshot via the channel so App can gate.)
-                // Actual accounting happens in App::submit_input; orchestrator
-                // simply allows the loop to run. Full per-model billing is
-                // enforced via App's CostTracker which is checked before
-                // calling orchestrator.run().
-
-                // Call the LLM
-                let schemas = if tool_schemas.is_empty() {
-                    None
-                } else {
-                    Some(tool_schemas.clone())
-                };
+                let schemas = if tool_schemas.is_empty() { None } else { Some(tool_schemas.clone()) };
                 let mut stream_rx = agent.chat_stream(current_messages.clone(), schemas);
 
                 let mut assistant_text = String::new();
-                let mut pending_tool_calls: Vec<rusty_ollama::ToolCallResponse> = Vec::new();
+                let mut pending_tool_calls: Vec<ToolCallPayload> = Vec::new();
 
-                // Consume the stream
                 while let Some(event) = stream_rx.recv().await {
                     match event {
-                        StreamEvent::Token(text) => {
-                            let _ = tx.send(OrchestratorEvent::Token(text.clone())).await;
-                            assistant_text.push_str(&text);
+                        StreamEvent::TextDelta { content } => {
+                            let _ = tx.send(OrchestratorEvent::Token(content.clone())).await;
+                            assistant_text.push_str(&content);
                         }
-                        StreamEvent::ToolCall(tc) => {
+                        StreamEvent::ToolCallDone { payload } => {
                             let _ = tx
                                 .send(OrchestratorEvent::ToolCall {
-                                    name: tc.function.name.clone(),
-                                    args: tc.function.arguments.clone(),
+                                    name: payload.name.clone(),
+                                    args: payload.arguments.clone(),
                                 })
                                 .await;
-                            pending_tool_calls.push(tc);
+                            pending_tool_calls.push(payload);
                         }
-                        StreamEvent::Done => break,
-                        StreamEvent::Error(e) => {
-                            let _ = tx.send(OrchestratorEvent::Error(e)).await;
+                        StreamEvent::Finish { .. } | StreamEvent::StepFinish { .. } => break,
+                        StreamEvent::Error { message, .. } => {
+                            let _ = tx.send(OrchestratorEvent::Error(message)).await;
                             return;
                         }
+                        _ => {}
                     }
                 }
 
-                // No tool calls — the model gave a final answer
                 if pending_tool_calls.is_empty() {
                     let _ = tx.send(OrchestratorEvent::Done(assistant_text)).await;
                     return;
                 }
 
-                // Append assistant message with tool calls
-                current_messages.push(rusty_ollama::ChatMessage {
-                    role: "assistant".to_string(),
-                    content: assistant_text,
-                    tool_calls: Some(pending_tool_calls.clone()),
-                });
+                current_messages.push(AgentMessage::assistant_with_tools(
+                    assistant_text,
+                    pending_tool_calls.clone(),
+                ));
 
-                // Execute each tool call and append results
                 let mut handles = tokio::task::JoinSet::new();
 
-                for tc in &pending_tool_calls {
-                    let tool_name = tc.function.name.clone();
-                    let tool_args = tc.function.arguments.clone();
-                    
+                for tc in pending_tool_calls {
+                    let tool_name = tc.name.clone();
+                    let tool_args = tc.arguments.clone();
+                    let call_id = tc.id.clone();
                     let tools_arc = Arc::clone(&tools);
                     let perms_arc = Arc::clone(&permissions);
                     let tx_arc = tx.clone();
-                    
+
                     handles.spawn(async move {
                         let result = if let Some(tool) = tools_arc.get(&tool_name) {
                             let path = tool.get_path(&tool_args);
@@ -309,7 +253,9 @@ impl Orchestrator {
 
                             let tool_specific = tool.check_permissions(&tool_args);
                             if !matches!(perm_res, crate::tools::PermissionResult::Deny(_)) {
-                                perm_res = perms_arc.check_tool_call(&tool_name, tool.risk(), tool_specific, &tool_args);
+                                perm_res = perms_arc.check_tool_call(
+                                    &tool_name, tool.risk(), tool_specific, &tool_args,
+                                );
                             }
 
                             if let crate::tools::PermissionResult::Deny(r) = perm_res {
@@ -318,12 +264,14 @@ impl Orchestrator {
                                 let mut allowed = true;
                                 if let crate::tools::PermissionResult::Ask(reason) = perm_res {
                                     let (reply_tx, reply_rx) = oneshot::channel();
-                                    let _ = tx_arc.send(OrchestratorEvent::PermissionRequested {
-                                        name: tool_name.clone(),
-                                        args: tool_args.clone(),
-                                        reason,
-                                        tx: reply_tx,
-                                    }).await;
+                                    let _ = tx_arc
+                                        .send(OrchestratorEvent::PermissionRequested {
+                                            name: tool_name.clone(),
+                                            args: tool_args.clone(),
+                                            reason,
+                                            tx: reply_tx,
+                                        })
+                                        .await;
                                     allowed = reply_rx.await.unwrap_or(false);
                                 }
 
@@ -357,22 +305,19 @@ impl Orchestrator {
                             }).await;
                             err_val
                         };
-                        
-                        (tool_name, result)
+
+                        (call_id, result)
                     });
                 }
 
                 while let Some(res) = handles.join_next().await {
-                    if let Ok((_name, result)) = res {
-                        current_messages.push(rusty_ollama::ChatMessage {
-                            role: "tool".to_string(),
-                            content: serde_json::to_string(&result).unwrap_or_default(),
-                            tool_calls: None,
-                        });
+                    if let Ok((call_id, result)) = res {
+                        current_messages.push(AgentMessage::tool_result(
+                            call_id,
+                            serde_json::to_string(&result).unwrap_or_default(),
+                        ));
                     }
                 }
-
-                // Loop back to call the LLM with the tool results
             }
         });
 
