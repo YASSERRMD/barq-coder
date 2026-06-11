@@ -43,6 +43,8 @@ impl ProviderCapabilities {
         }
     }
 
+    // ── Local / self-hosted ───────────────────────────────────────────────────
+
     pub fn ollama_default() -> Self {
         Self {
             tool_support: ToolSupportLevel::Native,
@@ -55,6 +57,8 @@ impl ProviderCapabilities {
         }
     }
 
+    // ── Cloud providers ───────────────────────────────────────────────────────
+
     pub fn openai_default() -> Self {
         Self {
             tool_support: ToolSupportLevel::Native,
@@ -64,6 +68,149 @@ impl ProviderCapabilities {
             max_context_tokens: 128_000,
             supports_system_message: true,
             supports_parallel_tool_calls: true,
+        }
+    }
+
+    /// Anthropic Messages API — claude-3+ all support vision and 200k context.
+    pub fn anthropic_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: true,
+            max_context_tokens: 200_000,
+            supports_system_message: true,
+            supports_parallel_tool_calls: true,
+        }
+    }
+
+    /// Google Gemini via OpenAI-compatible endpoint — 1M context, vision, native tools.
+    pub fn gemini_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: true,
+            max_context_tokens: 1_000_000,
+            supports_system_message: true,
+            supports_parallel_tool_calls: true,
+        }
+    }
+
+    /// Mistral AI — 128k context, native tools; vision only on pixtral models.
+    pub fn mistral_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 128_000,
+            supports_system_message: true,
+            supports_parallel_tool_calls: true,
+        }
+    }
+
+    /// Groq ultra-fast inference — conservative 32k default; specific models vary.
+    pub fn groq_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 32_768,
+            supports_system_message: true,
+            supports_parallel_tool_calls: false,
+        }
+    }
+
+    /// Together AI — open-model hosting; 32k conservative default.
+    pub fn together_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 32_768,
+            supports_system_message: true,
+            supports_parallel_tool_calls: false,
+        }
+    }
+
+    /// DeepSeek API — deepseek-chat (V3) has native tools; deepseek-reasoner does not.
+    pub fn deepseek_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 64_000,
+            supports_system_message: true,
+            supports_parallel_tool_calls: false,
+        }
+    }
+
+    /// xAI Grok — 131k context, native tools; vision only on grok-2-vision models.
+    pub fn xai_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 131_072,
+            supports_system_message: true,
+            supports_parallel_tool_calls: false,
+        }
+    }
+
+    /// Perplexity sonar — uses built-in web search instead of function calling.
+    pub fn perplexity_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::None,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 127_072,
+            supports_system_message: true,
+            supports_parallel_tool_calls: false,
+        }
+    }
+
+    /// Cohere Command — native tool calling, 128k context.
+    pub fn cohere_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 128_000,
+            supports_system_message: true,
+            supports_parallel_tool_calls: true,
+        }
+    }
+
+    /// Fireworks AI serverless inference — OpenAI-compatible, 131k context.
+    pub fn fireworks_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 131_072,
+            supports_system_message: true,
+            supports_parallel_tool_calls: true,
+        }
+    }
+
+    /// Cerebras ultra-fast inference — OpenAI-compatible, 131k context.
+    pub fn cerebras_default() -> Self {
+        Self {
+            tool_support: ToolSupportLevel::Native,
+            supports_streaming: true,
+            supports_reasoning: false,
+            supports_vision: false,
+            max_context_tokens: 131_072,
+            supports_system_message: true,
+            supports_parallel_tool_calls: false,
         }
     }
 
