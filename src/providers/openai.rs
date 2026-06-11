@@ -8,9 +8,11 @@ use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::{ProviderAdapter, ProviderCapabilities, TrustTier};
+use super::registry::CapabilityRegistry;
 
 /// Adapter for any OpenAI-compatible API (OpenAI, Azure, LM Studio, etc.).
 /// Handles SSE streaming, tool-call delta accumulation, and usage reporting.
@@ -19,10 +21,11 @@ pub struct OpenAiAdapter {
     model: String,
     api_key: String,
     http: HttpClient,
+    registry: Arc<CapabilityRegistry>,
 }
 
 impl OpenAiAdapter {
-    pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, model: &str, api_key: &str, registry: Arc<CapabilityRegistry>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
@@ -31,6 +34,7 @@ impl OpenAiAdapter {
                 .timeout(std::time::Duration::from_secs(300))
                 .build()
                 .expect("Failed to build HTTP client for OpenAiAdapter"),
+            registry,
         }
     }
 
@@ -167,7 +171,7 @@ impl ProviderAdapter for OpenAiAdapter {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::openai_default()
+        self.registry.lookup("openai", &self.model, ProviderCapabilities::openai_default())
     }
 
     fn trust_tier(&self) -> TrustTier {
