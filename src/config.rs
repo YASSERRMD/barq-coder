@@ -1,13 +1,32 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use crate::providers::ProviderKind;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
+    /// Which LLM provider to use. Defaults to Ollama.
+    #[serde(default)]
+    pub provider: ProviderKind,
+
+    // ── Ollama settings ───────────────────────────────────────────────────────
     #[serde(default = "default_ollama_base_url")]
     pub ollama_base_url: String,
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
+
+    // ── OpenAI-compatible settings ────────────────────────────────────────────
+    /// Base URL for OpenAI-compatible API (defaults to https://api.openai.com).
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
+    /// Model name when using the OpenAI provider (defaults to gpt-4o).
+    #[serde(default)]
+    pub openai_model: Option<String>,
+    /// API key for OpenAI-compatible providers; can also be set via OPENAI_API_KEY.
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+
+    // ── Storage ───────────────────────────────────────────────────────────────
     #[serde(default = "default_barqdb_url")]
     pub barqdb_url: String,
     #[serde(default = "default_barqgraph_url")]
@@ -34,8 +53,12 @@ fn default_token_limit() -> u32 { 4096 }
 impl Default for Config {
     fn default() -> Self {
         Self {
+            provider: ProviderKind::default(),
             ollama_base_url: default_ollama_base_url(),
             ollama_model: default_ollama_model(),
+            openai_base_url: None,
+            openai_model: None,
+            openai_api_key: None,
             barqdb_url: default_barqdb_url(),
             barqgraph_url: default_barqgraph_url(),
             workspace_root: default_workspace_root(),
@@ -48,7 +71,7 @@ impl Default for Config {
 
 impl Config {
     /// Load configuration with the following precedence (highest → lowest):
-    /// 1. Environment variables (`BARQ_*`)
+    /// 1. Environment variables (`BARQ_*`, `OPENAI_*`)
     /// 2. `Config.toml` file values
     /// 3. Built-in defaults
     pub fn load() -> Self {
@@ -74,13 +97,27 @@ impl Config {
         config
     }
 
-    /// Apply `BARQ_*` environment variable overrides on top of file/default values.
     fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("BARQ_PROVIDER") {
+            self.provider = match v.to_lowercase().as_str() {
+                "openai" => ProviderKind::OpenAi,
+                _ => ProviderKind::Ollama,
+            };
+        }
         if let Ok(v) = std::env::var("BARQ_OLLAMA_URL") {
             self.ollama_base_url = v;
         }
         if let Ok(v) = std::env::var("BARQ_MODEL") {
             self.ollama_model = v;
+        }
+        if let Ok(v) = std::env::var("OPENAI_API_KEY") {
+            self.openai_api_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENAI_BASE_URL") {
+            self.openai_base_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENAI_MODEL") {
+            self.openai_model = Some(v);
         }
         if let Ok(v) = std::env::var("BARQ_BARQDB_URL") {
             self.barqdb_url = v;
@@ -114,16 +151,28 @@ impl Config {
         }
     }
 
-    /// Validate configuration values. Returns a list of validation error messages.
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
 
-        if self.ollama_base_url.is_empty() {
-            errors.push("ollama_base_url must not be empty".to_string());
+        match self.provider {
+            ProviderKind::Ollama => {
+                if self.ollama_base_url.is_empty() {
+                    errors.push("ollama_base_url must not be empty".to_string());
+                }
+                if self.ollama_model.is_empty() {
+                    errors.push("ollama_model must not be empty".to_string());
+                }
+            }
+            ProviderKind::OpenAi => {
+                if self.openai_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "openai_api_key is required when provider = openai (or set OPENAI_API_KEY)"
+                            .to_string(),
+                    );
+                }
+            }
         }
-        if self.ollama_model.is_empty() {
-            errors.push("ollama_model must not be empty".to_string());
-        }
+
         if self.max_iterations == 0 {
             errors.push("max_iterations must be at least 1".to_string());
         }
@@ -135,13 +184,22 @@ impl Config {
         }
         if let Some(cap) = self.budget_cap_usd {
             if cap <= 0.0 {
-                errors.push(format!(
-                    "budget_cap_usd ({cap}) must be a positive value"
-                ));
+                errors.push(format!("budget_cap_usd ({cap}) must be a positive value"));
             }
         }
 
         errors
+    }
+
+    /// Human-readable active model label for TUI display.
+    pub fn active_model_label(&self) -> String {
+        match self.provider {
+            ProviderKind::Ollama => format!("ollama:{}", self.ollama_model),
+            ProviderKind::OpenAi => format!(
+                "openai:{}",
+                self.openai_model.as_deref().unwrap_or("gpt-4o")
+            ),
+        }
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
