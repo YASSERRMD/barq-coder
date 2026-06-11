@@ -5,7 +5,7 @@ use barq_ir::{
 };
 use futures::StreamExt;
 use reqwest::Client as HttpClient;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,10 +14,20 @@ use tokio::sync::mpsc;
 use super::{ProviderAdapter, ProviderCapabilities, TrustTier};
 use super::registry::CapabilityRegistry;
 
-/// Adapter for any OpenAI-compatible API (OpenAI, Azure, LM Studio, etc.).
-/// Handles SSE streaming, tool-call delta accumulation, and usage reporting.
+/// Adapter for any OpenAI-compatible chat completion API.
+///
+/// Works with: OpenAI, Google Gemini (v1beta/openai endpoint), Mistral,
+/// Groq, Together AI, DeepSeek, xAI, Perplexity, Cohere (compatibility/v1),
+/// Fireworks, Cerebras — any provider that speaks the OpenAI SSE/REST protocol.
+///
+/// The `provider_id` field controls which capability defaults are used in the
+/// registry lookup and which label appears in `OrchestratorEvent::ProviderInfo`.
 pub struct OpenAiAdapter {
+    provider_id: String,
     base_url: String,
+    /// Path appended to base_url for chat completions.
+    /// Defaults to "/v1/chat/completions"; set "/chat/completions" for Perplexity.
+    chat_path: String,
     model: String,
     api_key: String,
     http: HttpClient,
@@ -25,9 +35,30 @@ pub struct OpenAiAdapter {
 }
 
 impl OpenAiAdapter {
+    /// Create an OpenAI-branded adapter (provider_id = "openai").
     pub fn new(base_url: &str, model: &str, api_key: &str, registry: Arc<CapabilityRegistry>) -> Self {
+        Self::new_for_provider("openai", base_url, "/v1/chat/completions", model, api_key, registry)
+    }
+
+    /// Create an adapter for any OpenAI-compatible provider.
+    ///
+    /// - `provider_id`: stable id used in registry lookup and event labels
+    ///   (e.g. `"groq"`, `"gemini"`, `"mistral"`)
+    /// - `chat_path`: URL path for the completions endpoint;
+    ///   `"/v1/chat/completions"` works for most providers;
+    ///   Perplexity uses `"/chat/completions"` (no `/v1/` prefix)
+    pub fn new_for_provider(
+        provider_id: &str,
+        base_url: &str,
+        chat_path: &str,
+        model: &str,
+        api_key: &str,
+        registry: Arc<CapabilityRegistry>,
+    ) -> Self {
         Self {
+            provider_id: provider_id.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
+            chat_path: chat_path.to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
             http: HttpClient::builder()
@@ -40,9 +71,30 @@ impl OpenAiAdapter {
 
     fn provider_meta(&self) -> ProviderMetadata {
         ProviderMetadata {
-            provider_id: "openai".to_string(),
+            provider_id: self.provider_id.clone(),
             model_id: self.model.clone(),
             raw_provider_tag: Some(self.model.clone()),
+        }
+    }
+
+    fn completions_url(&self) -> String {
+        format!("{}{}", self.base_url, self.chat_path)
+    }
+
+    /// Select the correct provider default for the registry lookup.
+    fn provider_default(&self) -> ProviderCapabilities {
+        match self.provider_id.as_str() {
+            "gemini" => ProviderCapabilities::gemini_default(),
+            "mistral" => ProviderCapabilities::mistral_default(),
+            "groq" => ProviderCapabilities::groq_default(),
+            "together" => ProviderCapabilities::together_default(),
+            "deepseek" => ProviderCapabilities::deepseek_default(),
+            "xai" => ProviderCapabilities::xai_default(),
+            "perplexity" => ProviderCapabilities::perplexity_default(),
+            "cohere" => ProviderCapabilities::cohere_default(),
+            "fireworks" => ProviderCapabilities::fireworks_default(),
+            "cerebras" => ProviderCapabilities::cerebras_default(),
+            _ => ProviderCapabilities::openai_default(),
         }
     }
 
@@ -163,7 +215,7 @@ struct CompletionFunction {
 #[async_trait]
 impl ProviderAdapter for OpenAiAdapter {
     fn provider_id(&self) -> &str {
-        "openai"
+        &self.provider_id
     }
 
     fn model_id(&self) -> &str {
@@ -171,7 +223,7 @@ impl ProviderAdapter for OpenAiAdapter {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        self.registry.lookup("openai", &self.model, ProviderCapabilities::openai_default())
+        self.registry.lookup(&self.provider_id, &self.model, self.provider_default())
     }
 
     fn trust_tier(&self) -> TrustTier {
@@ -185,7 +237,7 @@ impl ProviderAdapter for OpenAiAdapter {
     ) -> mpsc::Receiver<StreamEvent> {
         let (tx, rx) = mpsc::channel(256);
 
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = self.completions_url();
         let openai_messages = Self::to_openai_messages(&messages);
 
         let mut body = serde_json::json!({
@@ -224,7 +276,7 @@ impl ProviderAdapter for OpenAiAdapter {
                 let body_text = response.text().await.unwrap_or_default();
                 let _ = tx
                     .send(StreamEvent::Error {
-                        message: format!("OpenAI {} : {}", status, body_text),
+                        message: format!("Provider error {} : {}", status, body_text),
                         retryable: status.is_server_error(),
                     })
                     .await;
@@ -261,23 +313,15 @@ impl ProviderAdapter for OpenAiAdapter {
                     }
 
                     if line == "data: [DONE]" {
-                        // Flush any remaining accumulated tool calls
                         for (_, (id, name, args)) in &tool_accum {
                             let parsed = serde_json::from_str::<Value>(args)
                                 .unwrap_or_else(|_| serde_json::json!({}));
                             let payload = ToolCallPayload::with_id(
-                                id.clone(),
-                                name.clone(),
-                                parsed,
-                                args.clone(),
+                                id.clone(), name.clone(), parsed, args.clone(),
                             );
                             let _ = tx.send(StreamEvent::ToolCallDone { payload }).await;
                         }
-                        let _ = tx
-                            .send(StreamEvent::Finish {
-                                stop_reason: StopReason::EndTurn,
-                            })
-                            .await;
+                        let _ = tx.send(StreamEvent::Finish { stop_reason: StopReason::EndTurn }).await;
                         return;
                     }
 
@@ -295,9 +339,7 @@ impl ProviderAdapter for OpenAiAdapter {
                         if let Some(content) = &choice.delta.content {
                             if !content.is_empty() {
                                 let _ = tx
-                                    .send(StreamEvent::TextDelta {
-                                        content: content.clone(),
-                                    })
+                                    .send(StreamEvent::TextDelta { content: content.clone() })
                                     .await;
                             }
                         }
@@ -346,10 +388,7 @@ impl ProviderAdapter for OpenAiAdapter {
                                         let parsed = serde_json::from_str::<Value>(args)
                                             .unwrap_or_else(|_| serde_json::json!({}));
                                         let payload = ToolCallPayload::with_id(
-                                            id.clone(),
-                                            name.clone(),
-                                            parsed,
-                                            args.clone(),
+                                            id.clone(), name.clone(), parsed, args.clone(),
                                         );
                                         let _ = tx.send(StreamEvent::ToolCallDone { payload }).await;
                                     }
@@ -374,7 +413,7 @@ impl ProviderAdapter for OpenAiAdapter {
         messages: Vec<AgentMessage>,
         tools: Option<Vec<Value>>,
     ) -> Result<AgentTurn, String> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = self.completions_url();
         let openai_messages = Self::to_openai_messages(&messages);
 
         let mut body = serde_json::json!({
@@ -402,7 +441,7 @@ impl ProviderAdapter for OpenAiAdapter {
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
-            return Err(format!("OpenAI {} : {}", status, body_text));
+            return Err(format!("Provider error {} : {}", status, body_text));
         }
 
         let completion: ChatCompletion = response
@@ -414,7 +453,7 @@ impl ProviderAdapter for OpenAiAdapter {
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| "No choices in OpenAI response".to_string())?;
+            .ok_or_else(|| "No choices in provider response".to_string())?;
 
         let mut parts = Vec::new();
         if let Some(content) = choice.message.content {
