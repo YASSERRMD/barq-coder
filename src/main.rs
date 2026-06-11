@@ -45,7 +45,7 @@ mod tui;
 mod verifier;
 mod voice;
 
-use agent::OllamaClient;
+
 use barq::BarqIndex;
 use cli::{Cli, Commands};
 use clap::Parser;
@@ -1002,11 +1002,11 @@ impl App {
         if let Some(w) = &cli.workspace { config.workspace_root = w.clone(); }
         if let Some(u) = &cli.ollama_url { config.ollama_base_url = u.clone(); }
         if let Some(t) = cli.max_turns { config.max_iterations = t; }
-        let agent = OllamaClient::new(&config.ollama_base_url, &config.ollama_model);
+        let agent = crate::providers::build_provider(&config);
         let barq = Arc::new(BarqIndex::new(&config).expect("Failed to create BarqIndex"));
         let mut tools_mut = ToolRegistry::with_barq(Arc::clone(&barq));
         tools_mut.register(Box::new(crate::tools::delegate::DelegateTask::new(
-            agent.clone(),
+            Arc::clone(&agent),
             Arc::clone(&barq),
         )));
         let task_board = Arc::new(crate::tasks::TaskBoard::new());
@@ -1016,13 +1016,13 @@ impl App {
 
         let tools = Arc::new(tools_mut);
         let orchestrator = Orchestrator::new(
-            agent.clone(),
+            Arc::clone(&agent),
             Arc::clone(&tools),
             Arc::clone(&barq),
             config.clone(),
         );
         let coordinator = Arc::new(CoordinatorAgent::new(
-            agent,
+            Arc::clone(&agent),
             Arc::clone(&barq),
             tools,
         ));
@@ -1050,7 +1050,7 @@ impl App {
         let saved_sessions = collect_saved_sessions(&session_store);
 
         let token_limit = config.token_limit;
-        let model = config.ollama_model.clone();
+        let model = config.active_model_label();
         let transcript_control = TranscriptControlBridge::new()?;
 
         let mut tui = TuiState::new(token_limit, model, session_id.clone());
@@ -1207,11 +1207,11 @@ async fn run_headless(prompt: &str, json_mode: bool, cli: &Cli) -> anyhow::Resul
     if let Some(u) = &cli.ollama_url { config.ollama_base_url = u.clone(); }
     if let Some(t) = cli.max_turns { config.max_iterations = t; }
 
-    let agent = OllamaClient::new(&config.ollama_base_url, &config.ollama_model);
+    let agent = crate::providers::build_provider(&config);
     let barq = Arc::new(BarqIndex::new(&config)?);
     let mut tools_mut = ToolRegistry::with_barq(Arc::clone(&barq));
     tools_mut.register(Box::new(crate::tools::delegate::DelegateTask::new(
-        agent.clone(),
+        Arc::clone(&agent),
         Arc::clone(&barq),
     )));
     let task_board = Arc::new(crate::tasks::TaskBoard::new());
@@ -1219,7 +1219,7 @@ async fn run_headless(prompt: &str, json_mode: bool, cli: &Cli) -> anyhow::Resul
     tools_mut.register(Box::new(crate::tools::task_tools::TaskUpdateTool::new(Arc::clone(&task_board))));
     tools_mut.register(Box::new(crate::tools::task_tools::TaskListTool::new(Arc::clone(&task_board))));
     let tools = Arc::new(tools_mut);
-    let mut orch = Orchestrator::new(agent, tools, barq, config.clone());
+    let mut orch = Orchestrator::new(Arc::clone(&agent), tools, barq, config.clone());
     let rx = orch.run(prompt);
     let mut full_response = String::new();
     let mut tool_calls_used: Vec<String> = Vec::new();
@@ -1246,7 +1246,7 @@ async fn run_headless(prompt: &str, json_mode: bool, cli: &Cli) -> anyhow::Resul
         println!("{}", serde_json::json!({
             "response": full_response,
             "tool_calls": tool_calls_used,
-            "model": config.ollama_model,
+            "model": config.active_model_label(),
         }));
     } else {
         println!("{}", full_response);
@@ -1989,7 +1989,7 @@ fn submit_input(app: &mut App, input: &str) {
     } else if input == "/status" {
         let status = format!(
             "Model: {}\nTokens: {}/{} ({:.0}%)\nSession: {}\nMessages: {}\nTool log: {} entries",
-            app.config.ollama_model,
+            app.config.active_model_label(),
             app.tui.token_count, app.tui.token_limit,
             if app.tui.token_limit > 0 { app.tui.token_count as f64 / app.tui.token_limit as f64 * 100.0 } else { 0.0 },
             app.session_id,
@@ -2046,7 +2046,7 @@ fn submit_input(app: &mut App, input: &str) {
             &app.session_id.clone(),
             &app.session_store,
             &app.cost,
-            &app.config.ollama_model.clone(),
+            &app.config.active_model_label(),
         );
         match result {
             commands::CommandResult::Message(msg) => {
@@ -2054,7 +2054,7 @@ fn submit_input(app: &mut App, input: &str) {
             }
             commands::CommandResult::SwitchModel(name) => {
                 app.config.ollama_model = name.clone();
-                app.tui.add_message(ChatMessage::system(format!("Switched model to: {}", name)));
+                app.tui.add_message(ChatMessage::system(format!("Switched model to: {} (Ollama)", name)));
             }
             commands::CommandResult::Compaction => {
                 crate::context::auto_compact(&mut app.orchestrator.conversation, 6);
