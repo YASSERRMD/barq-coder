@@ -5,13 +5,24 @@ use crate::context::{auto_compact, ContextBudget, symbolic_injector::SymbolicInj
 use crate::cost_tracker::CostTracker;
 use crate::memory::Memory;
 use crate::permissions::PermissionManager;
-use crate::providers::ProviderAdapter;
+use crate::providers::{ProviderAdapter, TrustTier};
 use crate::tools::ToolRegistry;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 pub enum OrchestratorEvent {
+    /// Emitted once at the start of every `run()` call so the TUI can display
+    /// which provider/model is active and what its capabilities are.
+    ProviderInfo {
+        provider_id: String,
+        model_id: String,
+        tier: String,
+        can_use_tools: bool,
+        supports_vision: bool,
+        supports_reasoning: bool,
+        max_context_tokens: u32,
+    },
     Token(String),
     ToolCall { name: String, args: Value },
     ToolResult { name: String, result: Value },
@@ -175,7 +186,23 @@ impl Orchestrator {
         let max_iterations = self.config.max_iterations;
         let agent = Arc::clone(&self.agent);
 
+        // Snapshot capability info for the TUI before moving agent into the task
+        let caps = agent.capabilities();
+        let tier = agent.trust_tier();
+        let provider_info_event = OrchestratorEvent::ProviderInfo {
+            provider_id: agent.provider_id().to_string(),
+            model_id: agent.model_id().to_string(),
+            tier: tier.as_str().to_string(),
+            can_use_tools: caps.can_use_tools(),
+            supports_vision: caps.supports_vision,
+            supports_reasoning: caps.supports_reasoning,
+            max_context_tokens: caps.max_context_tokens,
+        };
+
         tokio::spawn(async move {
+            // Notify TUI of the active provider/model/capabilities before the first token
+            let _ = tx.send(provider_info_event).await;
+
             let mut current_messages = messages;
             let mut iteration: u8 = 0;
 
@@ -241,8 +268,22 @@ impl Orchestrator {
                     let tools_arc = Arc::clone(&tools);
                     let perms_arc = Arc::clone(&permissions);
                     let tx_arc = tx.clone();
+                    // Capture the tier value (Copy) so it can cross the spawn boundary
+                    let provider_tier: TrustTier = tier;
 
                     handles.spawn(async move {
+                        // Trust-tier check is the first gate — it cannot be bypassed by
+                        // session auto-allow rules because it runs before check_tool_call.
+                        let tier_result = perms_arc.check_trust_tier(provider_tier, &tool_name);
+                        if let crate::tools::PermissionResult::Deny(r) = tier_result {
+                            let err_val = serde_json::json!({"error": r});
+                            let _ = tx_arc.send(OrchestratorEvent::ToolResult {
+                                name: tool_name.clone(),
+                                result: err_val.clone(),
+                            }).await;
+                            return (call_id, err_val);
+                        }
+
                         let result = if let Some(tool) = tools_arc.get(&tool_name) {
                             let path = tool.get_path(&tool_args);
                             let mut perm_res = if let Some(p) = path {
