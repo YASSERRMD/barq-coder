@@ -51,7 +51,8 @@ use cli::{Cli, Commands};
 use clap::Parser;
 use config::Config;
 use control_plane::{
-    ControlPlaneCommand, ControlPlaneResponse, NormalizedMessage, NormalizedMessageKind,
+    check_node_runtime, resolve_control_plane_script, ControlPlaneCommand,
+    ControlPlaneResponse, NormalizedMessage, NormalizedMessageKind,
     PermissionDecision as ControlPlanePermissionDecision, TranscriptControlBridge,
 };
 use cost_tracker::CostTracker;
@@ -1050,7 +1051,7 @@ impl App {
 
         let token_limit = config.token_limit;
         let model = config.ollama_model.clone();
-        let transcript_control = TranscriptControlBridge::new(&config.workspace_root)?;
+        let transcript_control = TranscriptControlBridge::new()?;
 
         let mut tui = TuiState::new(token_limit, model, session_id.clone());
         tui.workspace_files = workspace_files;
@@ -1264,6 +1265,21 @@ async fn run_doctor(cli: &Cli) -> anyhow::Result<()> {
         Ok(r) if r.status().is_success() => println!("Ollama is reachable. Model: {}", config.ollama_model),
         Ok(r) => println!("Ollama responded with status: {}", r.status()),
         Err(e) => println!("Cannot reach Ollama: {}", e),
+    }
+
+    match check_node_runtime() {
+        Ok(version) => println!("Node runtime OK: {}", version),
+        Err(err) => println!("Node runtime check failed: {}", err),
+    }
+
+    match resolve_control_plane_script() {
+        Ok(path) => println!("Control plane asset OK: {}", path.display()),
+        Err(err) => println!("Control plane asset check failed: {}", err),
+    }
+
+    match TranscriptControlBridge::new() {
+        Ok(_) => println!("Transcript control plane launch OK"),
+        Err(err) => println!("Transcript control plane launch failed: {}", err),
     }
     Ok(())
 }

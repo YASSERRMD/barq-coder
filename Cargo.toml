@@ -21,6 +21,7 @@ async-trait = "0.1"
 barqdb = { path = "components/barqdb" }
 barqgraph = { path = "components/barqgraph" }
 rusty_ollama = { path = "components/rusty_ollama" }
+barq_ir = { path = "components/barq_ir" }
 serde_yaml = "0.9.34"
 tower-lsp = "0.20.0"
 glob = "0.3"

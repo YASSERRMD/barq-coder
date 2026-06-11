@@ -1,0 +1,9 @@
+{
+  "name": "barqcoder-control-plane",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "control-plane": "node ./control_plane/transcript_control.ts",
+    "control-plane:check": "node ./control_plane/transcript_control.ts < /dev/null"
+  }
+}
