@@ -4,22 +4,26 @@ use barq_ir::{
     ToolCallPayload, UsageInfo,
 };
 use serde_json::Value;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::{ProviderAdapter, ProviderCapabilities, TrustTier};
+use super::registry::CapabilityRegistry;
 
 /// Adapter that wraps the `rusty_ollama` HTTP client and converts its output
 /// into the canonical IR. All Ollama-specific logic lives here.
 pub struct OllamaAdapter {
     client: rusty_ollama::Client,
     model: String,
+    registry: Arc<CapabilityRegistry>,
 }
 
 impl OllamaAdapter {
-    pub fn new(base_url: &str, model: &str) -> Self {
+    pub fn new(base_url: &str, model: &str, registry: Arc<CapabilityRegistry>) -> Self {
         Self {
             client: rusty_ollama::Client::new(base_url, model),
             model: model.to_string(),
+            registry,
         }
     }
 
@@ -73,7 +77,7 @@ impl ProviderAdapter for OllamaAdapter {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::ollama_default()
+        self.registry.lookup("ollama", &self.model, ProviderCapabilities::ollama_default())
     }
 
     fn trust_tier(&self) -> TrustTier {

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use crate::providers::ProviderKind;
+use crate::providers::capabilities::CapabilityOverride;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -25,6 +27,21 @@ pub struct Config {
     /// API key for OpenAI-compatible providers; can also be set via OPENAI_API_KEY.
     #[serde(default)]
     pub openai_api_key: Option<String>,
+
+    // ── Per-model capability overrides ────────────────────────────────────────
+    /// User-supplied capability patches keyed by "provider_id:model_id".
+    ///
+    /// Example in Config.toml:
+    /// ```toml
+    /// [model_capability_overrides."ollama:llava:13b"]
+    /// supports_vision = true
+    ///
+    /// [model_capability_overrides."openai:o3-mini"]
+    /// supports_reasoning = true
+    /// supports_system_message = false
+    /// ```
+    #[serde(default)]
+    pub model_capability_overrides: HashMap<String, CapabilityOverride>,
 
     // ── Storage ───────────────────────────────────────────────────────────────
     #[serde(default = "default_barqdb_url")]
@@ -59,6 +76,7 @@ impl Default for Config {
             openai_base_url: None,
             openai_model: None,
             openai_api_key: None,
+            model_capability_overrides: HashMap::new(),
             barqdb_url: default_barqdb_url(),
             barqgraph_url: default_barqgraph_url(),
             workspace_root: default_workspace_root(),

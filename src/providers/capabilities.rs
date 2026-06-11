@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 /// What level of tool/function-calling a provider supports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ToolSupportLevel {
     /// Native tool-calling API (e.g. OpenAI function calling, Anthropic tool use).
+    #[default]
     Native,
     /// Tool calls injected via prompt engineering — arguments may be less reliable.
     Prompted,
@@ -69,5 +70,53 @@ impl ProviderCapabilities {
     /// Whether this provider can use tool schemas at all.
     pub fn can_use_tools(&self) -> bool {
         !matches!(self.tool_support, ToolSupportLevel::None)
+    }
+}
+
+/// Per-model capability override — all fields are optional; `None` means "use provider default".
+///
+/// Used by `CapabilityRegistry` and serialised in `Config.model_capability_overrides`
+/// so users can teach the system about new or unusual models without changing code.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CapabilityOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_support: Option<ToolSupportLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_system_message: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_parallel_tool_calls: Option<bool>,
+}
+
+impl CapabilityOverride {
+    /// Apply this override on top of `base`, returning a merged `ProviderCapabilities`.
+    pub fn apply_to(&self, base: ProviderCapabilities) -> ProviderCapabilities {
+        ProviderCapabilities {
+            tool_support: self.tool_support.unwrap_or(base.tool_support),
+            supports_streaming: self.supports_streaming.unwrap_or(base.supports_streaming),
+            supports_reasoning: self.supports_reasoning.unwrap_or(base.supports_reasoning),
+            supports_vision: self.supports_vision.unwrap_or(base.supports_vision),
+            max_context_tokens: self.max_context_tokens.unwrap_or(base.max_context_tokens),
+            supports_system_message: self.supports_system_message.unwrap_or(base.supports_system_message),
+            supports_parallel_tool_calls: self.supports_parallel_tool_calls.unwrap_or(base.supports_parallel_tool_calls),
+        }
+    }
+
+    /// True if at least one field is set (i.e. this override does something).
+    pub fn has_any(&self) -> bool {
+        self.tool_support.is_some()
+            || self.supports_streaming.is_some()
+            || self.supports_reasoning.is_some()
+            || self.supports_vision.is_some()
+            || self.max_context_tokens.is_some()
+            || self.supports_system_message.is_some()
+            || self.supports_parallel_tool_calls.is_some()
     }
 }

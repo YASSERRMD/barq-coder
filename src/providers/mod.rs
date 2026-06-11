@@ -8,9 +8,11 @@ use tokio::sync::mpsc;
 pub mod capabilities;
 pub mod ollama;
 pub mod openai;
+pub mod registry;
 pub mod trust_tiers;
 
-pub use capabilities::ProviderCapabilities;
+pub use capabilities::{CapabilityOverride, ProviderCapabilities};
+pub use registry::CapabilityRegistry;
 pub use trust_tiers::TrustTier;
 
 /// Discriminant used in Config to select which adapter to build.
@@ -52,6 +54,8 @@ pub trait ProviderAdapter: Send + Sync {
     fn model_id(&self) -> &str;
 
     /// Capability profile for this provider + model pair.
+    /// Resolved through the CapabilityRegistry: provider default → built-in
+    /// model knowledge → user Config overrides.
     fn capabilities(&self) -> ProviderCapabilities;
 
     /// Trust tier that gates which tools this provider may invoke.
@@ -75,12 +79,20 @@ pub trait ProviderAdapter: Send + Sync {
 }
 
 /// Build a boxed `ProviderAdapter` from the runtime configuration.
-/// This is the single place that knows about all provider kinds.
+///
+/// Constructs a `CapabilityRegistry` pre-loaded from `config.model_capability_overrides`
+/// and shares it (via `Arc`) across all adapter instances so every capability
+/// lookup reflects both built-in knowledge and user overrides.
 pub fn build_provider(config: &crate::config::Config) -> Arc<dyn ProviderAdapter> {
+    let registry = Arc::new(CapabilityRegistry::from_config_overrides(
+        &config.model_capability_overrides,
+    ));
+
     match config.provider {
         ProviderKind::Ollama => Arc::new(ollama::OllamaAdapter::new(
             &config.ollama_base_url,
             &config.ollama_model,
+            Arc::clone(&registry),
         )),
         ProviderKind::OpenAi => Arc::new(openai::OpenAiAdapter::new(
             config
@@ -92,6 +104,7 @@ pub fn build_provider(config: &crate::config::Config) -> Arc<dyn ProviderAdapter
                 .as_deref()
                 .unwrap_or("gpt-4o"),
             config.openai_api_key.as_deref().unwrap_or(""),
+            Arc::clone(&registry),
         )),
     }
 }
