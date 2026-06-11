@@ -1,10 +1,10 @@
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::Arc;
-use crate::agent::OllamaClient;
 use crate::barq::BarqIndex;
 use crate::config::Config;
 use crate::orchestrator::{Orchestrator, OrchestratorEvent};
+use crate::providers::ProviderAdapter;
 use crate::tools::ToolRegistry;
 use serde_json::Value;
 
@@ -12,7 +12,7 @@ use serde_json::Value;
 /// an isolated Orchestrator headless thread to compute them, streaming JSONL OrchestratorEvents back.
 pub async fn start_daemon(
     port: u16,
-    agent: OllamaClient,
+    agent: Arc<dyn ProviderAdapter>,
     tools: Arc<ToolRegistry>,
     barq: Arc<BarqIndex>,
     config: Config,
@@ -22,8 +22,8 @@ pub async fn start_daemon(
 
     loop {
         let (mut socket, _) = listener.accept().await?;
-        
-        let agent_clone = agent.clone();
+
+        let agent_clone = Arc::clone(&agent);
         let tools_clone = Arc::clone(&tools);
         let barq_clone = Arc::clone(&barq);
         let config_clone = config.clone();
