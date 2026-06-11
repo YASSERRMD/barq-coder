@@ -36,6 +36,7 @@ mod memory;
 mod mcp;
 mod orchestrator;
 mod permissions;
+mod providers;
 mod sandbox;
 mod session;
 mod symbolic;
@@ -1505,6 +1506,36 @@ fn process_orchestrator_event(
                 .append(&app.session_id, &SessionEvent::assistant(&answer));
             app.streaming_assistant_raw.clear();
             *refresh_metadata = true;
+        }
+        OrchestratorEvent::ProviderInfo {
+            provider_id,
+            model_id,
+            tier,
+            can_use_tools,
+            supports_vision,
+            supports_reasoning,
+            max_context_tokens,
+        } => {
+            let mut flags = Vec::new();
+            if can_use_tools { flags.push("tools"); }
+            if supports_vision { flags.push("vision"); }
+            if supports_reasoning { flags.push("reasoning"); }
+            let flags_str = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", flags.join(", "))
+            };
+            app.tui.set_status(
+                format!(
+                    "{}/{} | tier:{} | ctx:{}k{}",
+                    provider_id,
+                    model_id,
+                    tier,
+                    max_context_tokens / 1000,
+                    flags_str
+                ),
+                false,
+            );
         }
         OrchestratorEvent::Error(err) => {
             app.tui.is_thinking = false;
