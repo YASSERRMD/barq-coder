@@ -1,3 +1,4 @@
+use crate::providers::TrustTier;
 use crate::tools::{CommandRisk, PermissionResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -131,6 +132,23 @@ impl PermissionManager {
             commands.insert(command.clone());
         }
         self.persist_allow_rule(&format!("Git({})", command))
+    }
+
+    /// Enforce the provider's trust tier at the permission boundary.
+    ///
+    /// Called before `check_tool_call` so a provider at `ReadOnly` tier can never
+    /// invoke `shell_exec` even if the user has previously auto-allowed that tool.
+    pub fn check_trust_tier(&self, tier: TrustTier, tool_name: &str) -> PermissionResult {
+        if tier.permits_tool(tool_name) {
+            PermissionResult::Allow
+        } else {
+            PermissionResult::Deny(format!(
+                "Tool '{}' is blocked — the active provider operates at trust tier '{}' \
+                 which does not permit this tool category.",
+                tool_name,
+                tier.as_str()
+            ))
+        }
     }
 
     pub fn check_path(&self, target_path: &str) -> PermissionResult {
