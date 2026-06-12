@@ -11,22 +11,105 @@ pub struct Config {
     #[serde(default)]
     pub provider: ProviderKind,
 
-    // ── Ollama settings ───────────────────────────────────────────────────────
+    // ── Ollama (local) ────────────────────────────────────────────────────────
     #[serde(default = "default_ollama_base_url")]
     pub ollama_base_url: String,
     #[serde(default = "default_ollama_model")]
     pub ollama_model: String,
 
-    // ── OpenAI-compatible settings ────────────────────────────────────────────
-    /// Base URL for OpenAI-compatible API (defaults to https://api.openai.com).
+    // ── OpenAI ────────────────────────────────────────────────────────────────
     #[serde(default)]
     pub openai_base_url: Option<String>,
-    /// Model name when using the OpenAI provider (defaults to gpt-4o).
     #[serde(default)]
     pub openai_model: Option<String>,
-    /// API key for OpenAI-compatible providers; can also be set via OPENAI_API_KEY.
     #[serde(default)]
     pub openai_api_key: Option<String>,
+
+    // ── Anthropic ─────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default)]
+    pub anthropic_model: Option<String>,
+
+    // ── Google Gemini ─────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub gemini_api_key: Option<String>,
+    #[serde(default)]
+    pub gemini_model: Option<String>,
+    #[serde(default)]
+    pub gemini_base_url: Option<String>,
+
+    // ── Mistral AI ────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub mistral_api_key: Option<String>,
+    #[serde(default)]
+    pub mistral_model: Option<String>,
+    #[serde(default)]
+    pub mistral_base_url: Option<String>,
+
+    // ── Groq ──────────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub groq_api_key: Option<String>,
+    #[serde(default)]
+    pub groq_model: Option<String>,
+    #[serde(default)]
+    pub groq_base_url: Option<String>,
+
+    // ── Together AI ───────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub together_api_key: Option<String>,
+    #[serde(default)]
+    pub together_model: Option<String>,
+    #[serde(default)]
+    pub together_base_url: Option<String>,
+
+    // ── DeepSeek ──────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub deepseek_api_key: Option<String>,
+    #[serde(default)]
+    pub deepseek_model: Option<String>,
+    #[serde(default)]
+    pub deepseek_base_url: Option<String>,
+
+    // ── xAI Grok ─────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub xai_api_key: Option<String>,
+    #[serde(default)]
+    pub xai_model: Option<String>,
+    #[serde(default)]
+    pub xai_base_url: Option<String>,
+
+    // ── Perplexity ────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub perplexity_api_key: Option<String>,
+    #[serde(default)]
+    pub perplexity_model: Option<String>,
+    #[serde(default)]
+    pub perplexity_base_url: Option<String>,
+
+    // ── Cohere ────────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub cohere_api_key: Option<String>,
+    #[serde(default)]
+    pub cohere_model: Option<String>,
+    #[serde(default)]
+    pub cohere_base_url: Option<String>,
+
+    // ── Fireworks AI ──────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub fireworks_api_key: Option<String>,
+    #[serde(default)]
+    pub fireworks_model: Option<String>,
+    #[serde(default)]
+    pub fireworks_base_url: Option<String>,
+
+    // ── Cerebras ─────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub cerebras_api_key: Option<String>,
+    #[serde(default)]
+    pub cerebras_model: Option<String>,
+    #[serde(default)]
+    pub cerebras_base_url: Option<String>,
 
     // ── Per-model capability overrides ────────────────────────────────────────
     /// User-supplied capability patches keyed by "provider_id:model_id".
@@ -76,6 +159,38 @@ impl Default for Config {
             openai_base_url: None,
             openai_model: None,
             openai_api_key: None,
+            anthropic_api_key: None,
+            anthropic_model: None,
+            gemini_api_key: None,
+            gemini_model: None,
+            gemini_base_url: None,
+            mistral_api_key: None,
+            mistral_model: None,
+            mistral_base_url: None,
+            groq_api_key: None,
+            groq_model: None,
+            groq_base_url: None,
+            together_api_key: None,
+            together_model: None,
+            together_base_url: None,
+            deepseek_api_key: None,
+            deepseek_model: None,
+            deepseek_base_url: None,
+            xai_api_key: None,
+            xai_model: None,
+            xai_base_url: None,
+            perplexity_api_key: None,
+            perplexity_model: None,
+            perplexity_base_url: None,
+            cohere_api_key: None,
+            cohere_model: None,
+            cohere_base_url: None,
+            fireworks_api_key: None,
+            fireworks_model: None,
+            fireworks_base_url: None,
+            cerebras_api_key: None,
+            cerebras_model: None,
+            cerebras_base_url: None,
             model_capability_overrides: HashMap::new(),
             barqdb_url: default_barqdb_url(),
             barqgraph_url: default_barqgraph_url(),
@@ -89,7 +204,7 @@ impl Default for Config {
 
 impl Config {
     /// Load configuration with the following precedence (highest → lowest):
-    /// 1. Environment variables (`BARQ_*`, `OPENAI_*`)
+    /// 1. Environment variables
     /// 2. `Config.toml` file values
     /// 3. Built-in defaults
     pub fn load() -> Self {
@@ -119,33 +234,65 @@ impl Config {
         if let Ok(v) = std::env::var("BARQ_PROVIDER") {
             self.provider = match v.to_lowercase().as_str() {
                 "openai" => ProviderKind::OpenAi,
+                "anthropic" => ProviderKind::Anthropic,
+                "gemini" => ProviderKind::Gemini,
+                "mistral" => ProviderKind::Mistral,
+                "groq" => ProviderKind::Groq,
+                "together" => ProviderKind::Together,
+                "deepseek" => ProviderKind::DeepSeek,
+                "xai" => ProviderKind::Xai,
+                "perplexity" => ProviderKind::Perplexity,
+                "cohere" => ProviderKind::Cohere,
+                "fireworks" => ProviderKind::Fireworks,
+                "cerebras" => ProviderKind::Cerebras,
                 _ => ProviderKind::Ollama,
             };
         }
-        if let Ok(v) = std::env::var("BARQ_OLLAMA_URL") {
-            self.ollama_base_url = v;
-        }
-        if let Ok(v) = std::env::var("BARQ_MODEL") {
-            self.ollama_model = v;
-        }
-        if let Ok(v) = std::env::var("OPENAI_API_KEY") {
-            self.openai_api_key = Some(v);
-        }
-        if let Ok(v) = std::env::var("OPENAI_BASE_URL") {
-            self.openai_base_url = Some(v);
-        }
-        if let Ok(v) = std::env::var("OPENAI_MODEL") {
-            self.openai_model = Some(v);
-        }
-        if let Ok(v) = std::env::var("BARQ_BARQDB_URL") {
-            self.barqdb_url = v;
-        }
-        if let Ok(v) = std::env::var("BARQ_BARQGRAPH_URL") {
-            self.barqgraph_url = v;
-        }
-        if let Ok(v) = std::env::var("BARQ_WORKSPACE") {
-            self.workspace_root = v;
-        }
+        // Ollama
+        if let Ok(v) = std::env::var("BARQ_OLLAMA_URL") { self.ollama_base_url = v; }
+        if let Ok(v) = std::env::var("BARQ_MODEL") { self.ollama_model = v; }
+        // OpenAI
+        if let Ok(v) = std::env::var("OPENAI_API_KEY") { self.openai_api_key = Some(v); }
+        if let Ok(v) = std::env::var("OPENAI_BASE_URL") { self.openai_base_url = Some(v); }
+        if let Ok(v) = std::env::var("OPENAI_MODEL") { self.openai_model = Some(v); }
+        // Anthropic
+        if let Ok(v) = std::env::var("ANTHROPIC_API_KEY") { self.anthropic_api_key = Some(v); }
+        if let Ok(v) = std::env::var("ANTHROPIC_MODEL") { self.anthropic_model = Some(v); }
+        // Gemini
+        if let Ok(v) = std::env::var("GEMINI_API_KEY") { self.gemini_api_key = Some(v); }
+        if let Ok(v) = std::env::var("GEMINI_MODEL") { self.gemini_model = Some(v); }
+        if let Ok(v) = std::env::var("GEMINI_BASE_URL") { self.gemini_base_url = Some(v); }
+        // Mistral
+        if let Ok(v) = std::env::var("MISTRAL_API_KEY") { self.mistral_api_key = Some(v); }
+        if let Ok(v) = std::env::var("MISTRAL_MODEL") { self.mistral_model = Some(v); }
+        // Groq
+        if let Ok(v) = std::env::var("GROQ_API_KEY") { self.groq_api_key = Some(v); }
+        if let Ok(v) = std::env::var("GROQ_MODEL") { self.groq_model = Some(v); }
+        // Together AI
+        if let Ok(v) = std::env::var("TOGETHER_API_KEY") { self.together_api_key = Some(v); }
+        if let Ok(v) = std::env::var("TOGETHER_MODEL") { self.together_model = Some(v); }
+        // DeepSeek
+        if let Ok(v) = std::env::var("DEEPSEEK_API_KEY") { self.deepseek_api_key = Some(v); }
+        if let Ok(v) = std::env::var("DEEPSEEK_MODEL") { self.deepseek_model = Some(v); }
+        // xAI
+        if let Ok(v) = std::env::var("XAI_API_KEY") { self.xai_api_key = Some(v); }
+        if let Ok(v) = std::env::var("XAI_MODEL") { self.xai_model = Some(v); }
+        // Perplexity
+        if let Ok(v) = std::env::var("PERPLEXITY_API_KEY") { self.perplexity_api_key = Some(v); }
+        if let Ok(v) = std::env::var("PERPLEXITY_MODEL") { self.perplexity_model = Some(v); }
+        // Cohere
+        if let Ok(v) = std::env::var("COHERE_API_KEY") { self.cohere_api_key = Some(v); }
+        if let Ok(v) = std::env::var("COHERE_MODEL") { self.cohere_model = Some(v); }
+        // Fireworks
+        if let Ok(v) = std::env::var("FIREWORKS_API_KEY") { self.fireworks_api_key = Some(v); }
+        if let Ok(v) = std::env::var("FIREWORKS_MODEL") { self.fireworks_model = Some(v); }
+        // Cerebras
+        if let Ok(v) = std::env::var("CEREBRAS_API_KEY") { self.cerebras_api_key = Some(v); }
+        if let Ok(v) = std::env::var("CEREBRAS_MODEL") { self.cerebras_model = Some(v); }
+        // Shared infra
+        if let Ok(v) = std::env::var("BARQ_BARQDB_URL") { self.barqdb_url = v; }
+        if let Ok(v) = std::env::var("BARQ_BARQGRAPH_URL") { self.barqgraph_url = v; }
+        if let Ok(v) = std::env::var("BARQ_WORKSPACE") { self.workspace_root = v; }
         if let Ok(v) = std::env::var("BARQ_MAX_ITERATIONS") {
             if let Ok(n) = v.parse::<u8>() {
                 self.max_iterations = n;
@@ -189,6 +336,73 @@ impl Config {
                     );
                 }
             }
+            ProviderKind::Anthropic => {
+                if self.anthropic_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "anthropic_api_key is required (or set ANTHROPIC_API_KEY)".to_string(),
+                    );
+                }
+            }
+            ProviderKind::Gemini => {
+                if self.gemini_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push("gemini_api_key is required (or set GEMINI_API_KEY)".to_string());
+                }
+            }
+            ProviderKind::Mistral => {
+                if self.mistral_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push("mistral_api_key is required (or set MISTRAL_API_KEY)".to_string());
+                }
+            }
+            ProviderKind::Groq => {
+                if self.groq_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push("groq_api_key is required (or set GROQ_API_KEY)".to_string());
+                }
+            }
+            ProviderKind::Together => {
+                if self.together_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "together_api_key is required (or set TOGETHER_API_KEY)".to_string(),
+                    );
+                }
+            }
+            ProviderKind::DeepSeek => {
+                if self.deepseek_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "deepseek_api_key is required (or set DEEPSEEK_API_KEY)".to_string(),
+                    );
+                }
+            }
+            ProviderKind::Xai => {
+                if self.xai_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push("xai_api_key is required (or set XAI_API_KEY)".to_string());
+                }
+            }
+            ProviderKind::Perplexity => {
+                if self.perplexity_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "perplexity_api_key is required (or set PERPLEXITY_API_KEY)".to_string(),
+                    );
+                }
+            }
+            ProviderKind::Cohere => {
+                if self.cohere_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push("cohere_api_key is required (or set COHERE_API_KEY)".to_string());
+                }
+            }
+            ProviderKind::Fireworks => {
+                if self.fireworks_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "fireworks_api_key is required (or set FIREWORKS_API_KEY)".to_string(),
+                    );
+                }
+            }
+            ProviderKind::Cerebras => {
+                if self.cerebras_api_key.as_deref().unwrap_or("").is_empty() {
+                    errors.push(
+                        "cerebras_api_key is required (or set CEREBRAS_API_KEY)".to_string(),
+                    );
+                }
+            }
         }
 
         if self.max_iterations == 0 {
@@ -211,11 +425,47 @@ impl Config {
 
     /// Human-readable active model label for TUI display.
     pub fn active_model_label(&self) -> String {
-        match self.provider {
+        match &self.provider {
             ProviderKind::Ollama => format!("ollama:{}", self.ollama_model),
             ProviderKind::OpenAi => format!(
-                "openai:{}",
-                self.openai_model.as_deref().unwrap_or("gpt-4o")
+                "openai:{}", self.openai_model.as_deref().unwrap_or("gpt-4o")
+            ),
+            ProviderKind::Anthropic => format!(
+                "anthropic:{}", self.anthropic_model.as_deref().unwrap_or("claude-sonnet-4-6")
+            ),
+            ProviderKind::Gemini => format!(
+                "gemini:{}", self.gemini_model.as_deref().unwrap_or("gemini-2.5-pro")
+            ),
+            ProviderKind::Mistral => format!(
+                "mistral:{}", self.mistral_model.as_deref().unwrap_or("mistral-large-latest")
+            ),
+            ProviderKind::Groq => format!(
+                "groq:{}", self.groq_model.as_deref().unwrap_or("llama-3.3-70b-versatile")
+            ),
+            ProviderKind::Together => format!(
+                "together:{}",
+                self.together_model.as_deref()
+                    .unwrap_or("meta-llama/Llama-3.3-70B-Instruct-Turbo")
+            ),
+            ProviderKind::DeepSeek => format!(
+                "deepseek:{}", self.deepseek_model.as_deref().unwrap_or("deepseek-chat")
+            ),
+            ProviderKind::Xai => format!(
+                "xai:{}", self.xai_model.as_deref().unwrap_or("grok-3-latest")
+            ),
+            ProviderKind::Perplexity => format!(
+                "perplexity:{}", self.perplexity_model.as_deref().unwrap_or("sonar-pro")
+            ),
+            ProviderKind::Cohere => format!(
+                "cohere:{}", self.cohere_model.as_deref().unwrap_or("command-r-plus")
+            ),
+            ProviderKind::Fireworks => format!(
+                "fireworks:{}",
+                self.fireworks_model.as_deref()
+                    .unwrap_or("accounts/fireworks/models/llama-v3p3-70b-instruct")
+            ),
+            ProviderKind::Cerebras => format!(
+                "cerebras:{}", self.cerebras_model.as_deref().unwrap_or("llama3.1-70b")
             ),
         }
     }
