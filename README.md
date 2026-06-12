@@ -1,12 +1,19 @@
-# Barq Coder
+<div align="center">
 
-**Barq Coder** is an autonomous, local-first coding agent built in Rust. It combines semantic code indexing, a multi-agent execution swarm, and a rich terminal interface to let you describe what you want and have the agent plan, implement, test, and review the code — entirely on your machine.
+![barq-coder banner](docs/assets/banner.png)
+
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-amber?style=flat-square)](LICENSE)
+[![Providers](https://img.shields.io/badge/providers-13-teal?style=flat-square)](#providers)
+[![Build](https://img.shields.io/badge/build-passing-green?style=flat-square)](#installation)
+
+**Autonomous · Local-first · Model-agnostic**
+
+</div>
 
 ---
 
-## Overview
-
-Barq Coder runs a ReAct (Reasoning + Acting) orchestrator loop against any model served by [Ollama](https://ollama.com). It indexes your codebase into a semantic vector database (BarqDB), decomposes complex goals into a dependency graph, and dispatches sub-tasks to specialized agents in parallel — all while surfacing results in a multi-pane terminal UI.
+**barq-coder** is an autonomous AI coding agent built in Rust. It combines a streaming ReAct orchestrator, semantic code indexing, a multi-agent swarm, and a rich terminal UI — running entirely on your machine with your choice of model.
 
 ```
 barqcoder --workspace ./my-project
@@ -17,36 +24,49 @@ barqcoder --workspace ./my-project
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   CLI / TUI (ratatui)                │
-└────────────────────────┬────────────────────────────┘
-                         │
-              ┌──────────▼──────────┐
-              │   ReAct Orchestrator │  ← context budget, auto-compact
-              └──────────┬──────────┘
-                         │
-         ┌───────────────▼───────────────┐
-         │        Tool Registry (20+)     │
-         │  ReadFile  GlobTool  GrepTool  │
-         │  EditFile  ShellExec  WebFetch │
-         │  delegate_task  BarqSearch … │
-         └───────────────┬───────────────┘
-                         │
-          ┌──────────────▼──────────────┐
-          │     Multi-Agent Swarm (DAG)  │
-          │  Planner → Coder ┐           │
-          │               Tester ┐       │
-          │                  Reviewer ←─┘│
-          └──────────────────────────────┘
-```
+![barq-coder architecture](docs/assets/architecture.png)
+
+barq-coder is built as a layered stack:
+
+| Layer | What it does |
+|---|---|
+| **Entry Points** | TUI (ratatui), LSP (VS Code extension), Headless/SDK |
+| **ReAct Orchestrator** | Streaming agent loop, context budget, TrustTier gate |
+| **Adapter Layer** | Provider-agnostic `ProviderAdapter` trait → canonical `barq_ir` IR |
+| **Agent Swarm** | Planner → Coder → Tester → Reviewer, tokio DAG |
+| **Tools** | 20+ tools, Cargo/Syn verification, permission guard |
+| **Storage** | BarqDB (vector), BarqGraph (relations), Session JSONL |
+
+---
+
+## Providers
+
+barq-coder supports **13 providers** out of the box. Switch with `BARQ_PROVIDER` or `provider = "..."` in `Config.toml`.
+
+| Provider | `BARQ_PROVIDER` | Default model | API key env var |
+|---|---|---|---|
+| **Ollama** (local) | `ollama` | `minimax-m2.7:cloud` | — |
+| **OpenAI** | `openai` | `gpt-4o` | `OPENAI_API_KEY` |
+| **Anthropic** | `anthropic` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
+| **Google Gemini** | `gemini` | `gemini-2.5-pro` | `GEMINI_API_KEY` |
+| **Mistral AI** | `mistral` | `mistral-large-latest` | `MISTRAL_API_KEY` |
+| **Groq** | `groq` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| **Together AI** | `together` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | `TOGETHER_API_KEY` |
+| **DeepSeek** | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| **xAI Grok** | `xai` | `grok-3-latest` | `XAI_API_KEY` |
+| **Perplexity** | `perplexity` | `sonar-pro` | `PERPLEXITY_API_KEY` |
+| **Cohere** | `cohere` | `command-r-plus` | `COHERE_API_KEY` |
+| **Fireworks AI** | `fireworks` | `llama-v3p3-70b-instruct` | `FIREWORKS_API_KEY` |
+| **Cerebras** | `cerebras` | `llama3.1-70b` | `CEREBRAS_API_KEY` |
+
+Per-model capability overrides (vision, reasoning, context window, tool support) are resolved automatically via the built-in `CapabilityRegistry` and can be further patched in `Config.toml`.
 
 ---
 
 ## Key Features
 
 **Autonomous Agent Loop**
-A streaming ReAct orchestrator calls Ollama, parses tool invocations, executes them, and feeds results back — looping until a final answer is reached. Context is automatically compacted when the token budget is exceeded.
+A streaming ReAct orchestrator calls the active provider, parses tool invocations, executes them, and feeds results back — looping until a final answer is reached. Context is automatically compacted when the token budget is exceeded.
 
 **Multi-Agent Swarm**
 Complex goals are decomposed by a `PlannerAgent` into a dependency DAG. Steps whose dependencies are satisfied are launched concurrently via `tokio::spawn` + `FuturesUnordered`. `CoderAgent`, `TesterAgent`, and `ReviewerAgent` each run independently with their own LLM context.
@@ -54,14 +74,20 @@ Complex goals are decomposed by a `PlannerAgent` into a dependency DAG. Steps wh
 **Semantic Code Index (BarqDB)**
 Workspace files are indexed into a vector database for semantic search. The orchestrator automatically injects relevant code snippets into the system prompt before each turn.
 
+**TrustTier Gate**
+Every tool call is checked against the active provider's `TrustTier` (ReadOnly / CodeModify / Shell / Full) before any session-level allow rules are consulted. This boundary cannot be bypassed by interactive approvals.
+
 **Permission System**
-Every tool call is checked against a path sandbox and allowed/denied list. Destructive operations pause the agent and prompt the user interactively in the TUI. Use `[Y]` to approve once, `[A]` to remember the matching scope like Claude Code (`accept edits for this session` or save an exact local bash/git allow rule in `.claude/settings.local.json`), or `[N]` to deny. CI environments can bypass with `--dangerously-skip-permissions`.
+Destructive operations pause the agent and prompt the user interactively in the TUI. `[Y]` approves once, `[A]` remembers the scope, `[N]` denies. CI environments can bypass with `--dangerously-skip-permissions`.
+
+**Capability Registry**
+Three-layer resolution — provider default → built-in model knowledge → user `Config.toml` overrides — so vision, reasoning, context size, and tool support are always correct for the active model without manual configuration.
 
 **Project Memory**
-Agent-relevant instructions are persisted in `.barqcoder.md` at the workspace root. These are loaded automatically and injected into every system prompt — similar to Claude Code's `CLAUDE.md`.
+Agent instructions are persisted in `.barqcoder.md` at the workspace root and injected into every system prompt.
 
 **Session Persistence**
-Sessions are stored as append-only JSONL files. Use `--continue` to resume the last session or `--resume <id>` to restore a specific one.
+Sessions are stored as append-only JSONL files. Resume with `--continue` or `--resume <id>`.
 
 **Headless / SDK Mode**
 Run a single prompt without the TUI and pipe the output:
@@ -76,7 +102,7 @@ A Language Server Protocol implementation is included. Launch with `barqcoder --
 
 ## Installation
 
-**Prerequisites:** [Rust](https://rustup.rs) 1.75+, [Ollama](https://ollama.com) running locally
+**Prerequisites:** [Rust](https://rustup.rs) 1.75+, [Ollama](https://ollama.com) (optional, for local models)
 
 ```bash
 git clone https://github.com/YASSERRMD/barq-coder
@@ -94,18 +120,34 @@ barqcoder doctor
 
 ## Configuration
 
-On first run, Barq Coder reads `Config.toml` from the current directory, falling back to built-in defaults.
+On first run, barq-coder reads `Config.toml` from the current directory, falling back to built-in defaults.
 
 ```toml
 # Config.toml
-ollama_base_url = "http://localhost:11434"
-ollama_model    = "qwen2.5-coder:7b"
+
+# Local Ollama (default)
+provider         = "ollama"
+ollama_base_url  = "http://localhost:11434"
+ollama_model     = "qwen2.5-coder:7b"
+
+# Or switch to a cloud provider:
+# provider = "anthropic"
+# anthropic_model = "claude-sonnet-4-6"
+
 workspace_root  = "./"
 max_iterations  = 10
 token_limit     = 32768
+
+# Per-model capability patches (optional):
+# [model_capability_overrides."ollama:llava:13b"]
+# supports_vision = true
+#
+# [model_capability_overrides."openai:o3-mini"]
+# supports_reasoning = true
+# supports_system_message = false
 ```
 
-All values can be overridden at runtime via CLI flags or environment variables.
+All values can be overridden via environment variables (`BARQ_PROVIDER`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …).
 
 ---
 
@@ -137,13 +179,13 @@ barqcoder print "explain the auth flow" --json
 | `barqcoder sessions --show <id>` | Replay a session's events |
 | `barqcoder memory` | Show project memory |
 | `barqcoder memory --add "always use anyhow for errors"` | Add a memory entry |
-| `barqcoder doctor` | Check Ollama connectivity |
+| `barqcoder doctor` | Check provider connectivity |
 
 ### Slash commands (inside TUI)
 
 | Command | Description |
 |---|---|
-| `/compact` | Compress conversation history to reclaim context space |
+| `/compact` | Compress conversation history to reclaim context |
 | `/plan` | Enter plan mode — agent outlines steps before acting |
 | `/review` | Show all file edits made this session |
 | `/memory [show]` | Display project memory |
@@ -188,13 +230,14 @@ barqcoder print "explain the auth flow" --json
 | `barq_search` | Semantic code search across the indexed workspace |
 | `delegate_task` | Dispatch a goal to the multi-agent swarm |
 | `file_history` | Undo/redo file edits |
-| `tool_search` | Search the tool registry by keyword |
-| `notebook_edit`| Edit Jupyter Notebook (.ipynb) cells natively without breaking JSON structures |
-| `python_repl`  | Execute inline Python code (REPL) and return stdout/stderr |
+| `notebook_edit` | Edit Jupyter Notebook (.ipynb) cells |
+| `python_repl` | Execute inline Python code (REPL) |
 
 ---
 
 ## Recommended Models
+
+### Local (Ollama)
 
 | Model | Size | Strength |
 |---|---|---|
@@ -204,6 +247,16 @@ barqcoder print "explain the auth flow" --json
 | `codellama:13b` | 7.4 GB | Function calling |
 
 Pull a model: `ollama pull qwen2.5-coder:7b`
+
+### Cloud
+
+| Provider | Model | Strength |
+|---|---|---|
+| Anthropic | `claude-sonnet-4-6` | Best all-round coding |
+| OpenAI | `gpt-4o` | Strong tool use, vision |
+| Gemini | `gemini-2.5-pro` | 2M context, reasoning |
+| Groq | `llama-3.3-70b-versatile` | Ultra-fast inference |
+| DeepSeek | `deepseek-chat` | Cost-effective, strong |
 
 ---
 
@@ -225,14 +278,11 @@ Add notes interactively: `/memory add always use snake_case for DB columns`
 
 ## Containerization (Docker)
 
-Barq Coder provides an optimized multi-stage `Dockerfile` and builds into a tiny, non-root Debian image.
-
 ```bash
 docker pull barqcoder:latest
 # or build locally:
 docker build -t barqcoder:local .
 
-# Run Barq Coder, mounting your workspace and propagating network to reach Ollama
 docker run -it --rm \
   --network host \
   -v $(pwd):/workspace \
@@ -241,14 +291,12 @@ docker run -it --rm \
 
 ---
 
-## Production & CI Deployment
+## CI / Production
 
-Barq Coder is fully configurable for CI pipelines using the `--dangerously-skip-permissions` and `--print` flags.
-
-Example GitHub Actions step using Barq Coder as an autonomous code reviewer:
 ```yaml
 - name: Review Code
   run: |
+    BARQ_PROVIDER=openai OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
     barqcoder print "Review the latest changes and suggest optimizations" \
       --dangerously-skip-permissions \
       --workspace .
