@@ -63,6 +63,7 @@ Per-model capability overrides (vision, reasoning, context window, tool support)
 
 ---
 
+
 ## Key Features
 
 **Autonomous Agent Loop**
